@@ -224,6 +224,7 @@ project_folder/
 ├── secrets.h
 ├── co2_log.csv
 ├── engineering_log.txt
+├── requirements.txt
 └── README.md
 ```
 
@@ -255,6 +256,10 @@ Start the dashboard:
 
 ```bash
 python dashboard.py
+```
+or
+```bash
+dashboard.exe
 ```
 
 ---
