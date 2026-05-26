@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v1.5
+# v1.6
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -57,6 +57,11 @@
  - Connection diagnostics
  - Automatic reconnect
  - GUI dashboard
+ - CO2 colour coding by air quality threshold
+ - 1000 ppm threshold reference line on graph
+ - Min / Max CO2 annotation for visible window
+ - Connection status indicator
+ - Last updated timestamp
 
 ============================================================
  REQUIRED FILES
@@ -88,11 +93,21 @@
  V3  = engineering message
 
 ============================================================
+ CO2 AIR QUALITY THRESHOLDS
+============================================================
+
+ < 800 ppm   GOOD        green
+ 800-1000    MODERATE    yellow
+ 1000-1500   POOR        orange
+ > 1500 ppm  BAD         red
+
+ Reference line drawn at 1000 ppm on graph.
+
+============================================================
 """
 
 import os
 import re
-import time
 import requests
 import pandas as pd
 import customtkinter as ctk
@@ -117,6 +132,26 @@ UPDATE_INTERVAL_MS = 5000
 
 CSV_LOG_FILE = "co2_log.csv"
 TXT_LOG_FILE = "engineering_log.txt"
+
+# ============================================================
+# CO2 AIR QUALITY COLOUR THRESHOLDS
+# ============================================================
+#
+# Thresholds based on standard indoor air quality guidelines.
+# The CO2 value label colour updates live every cycle.
+#
+# ============================================================
+
+CO2_GOOD     = 800    # below this  -> green
+CO2_MODERATE = 1000   # below this  -> yellow
+CO2_POOR     = 1500   # below this  -> orange
+                      # above 1500  -> red
+
+CO2_COLOR_GOOD     = "#00cc44"
+CO2_COLOR_MODERATE = "#ffd700"
+CO2_COLOR_POOR     = "#ff8800"
+CO2_COLOR_BAD      = "#ff2222"
+CO2_COLOR_DEFAULT  = "white"
 
 # ============================================================
 # READ AUTH TOKEN FROM secrets.h
@@ -232,6 +267,30 @@ def read_virtual_pin(pin):
 
 
 # ============================================================
+# CO2 COLOUR HELPER
+# ============================================================
+#
+# Returns the appropriate label colour string for a given
+# CO2 reading based on the configured threshold levels.
+#
+# ============================================================
+
+def co2_color(ppm):
+    """
+    Return display colour for a CO2 ppm value.
+    """
+
+    if ppm < CO2_GOOD:
+        return CO2_COLOR_GOOD
+    elif ppm < CO2_MODERATE:
+        return CO2_COLOR_MODERATE
+    elif ppm < CO2_POOR:
+        return CO2_COLOR_POOR
+    else:
+        return CO2_COLOR_BAD
+
+
+# ============================================================
 # GUI
 # ============================================================
 
@@ -321,7 +380,8 @@ label_co2_title.pack(pady=10)
 label_co2_value = ctk.CTkLabel(
     frame_co2,
     text="N/A ppm",
-    font=("Arial", 56, "bold")
+    font=("Arial", 56, "bold"),
+    text_color=CO2_COLOR_DEFAULT
 )
 label_co2_value.pack(pady=30)
 
@@ -402,6 +462,45 @@ label_hist_desc = ctk.CTkLabel(
 label_hist_desc.pack(side="left", padx=10)
 
 # ============================================================
+# CONNECTION STATUS INDICATOR
+# ============================================================
+#
+# Displays a coloured dot and text on the right side of the
+# bottom bar:
+#
+#   green  dot  ->  CONNECTED   (last fetch succeeded)
+#   red    dot  ->  OFFLINE     (last fetch failed)
+#
+# Updated every acquisition cycle.
+#
+# ============================================================
+
+label_status = ctk.CTkLabel(
+    frame_bottom,
+    text="⬤  CONNECTING...",
+    font=("Arial", 14),
+    text_color="gray"
+)
+label_status.pack(side="right", padx=20)
+
+# ============================================================
+# LAST UPDATED TIMESTAMP
+# ============================================================
+#
+# Shows the exact time data was last successfully received.
+# Helps identify stale data if the connection drops silently.
+#
+# ============================================================
+
+label_last_update = ctk.CTkLabel(
+    frame_bottom,
+    text="Last update: --:--:--",
+    font=("Arial", 13),
+    text_color="gray"
+)
+label_last_update.pack(side="right", padx=20)
+
+# ============================================================
 # UPDATE LOOP
 # ============================================================
 
@@ -421,6 +520,9 @@ def update_dashboard():
       - CSV logs
       - graph
       - engineering TXT logs
+      - connection status indicator
+      - last updated timestamp
+      - CO2 colour coding
     """
 
     try:
@@ -437,8 +539,45 @@ def update_dashboard():
         if hum is not None:
             label_hum_value.configure(text=f"{float(hum):.1f} %")
 
+        # ====================================================
+        # CONNECTION STATUS UPDATE
+        # ====================================================
+        #
+        # Consider connected if at least CO2 was received,
+        # as it is the primary sensor value.
+        #
+        # ====================================================
+
         if co2 is not None:
-            label_co2_value.configure(text=f"{int(float(co2))} ppm")
+            label_status.configure(
+                text="⬤  CONNECTED",
+                text_color="#00cc44"
+            )
+            label_last_update.configure(
+                text=f"Last update: {datetime.now().strftime('%H:%M:%S')}",
+                text_color="white"
+            )
+        else:
+            label_status.configure(
+                text="⬤  OFFLINE",
+                text_color="#ff2222"
+            )
+
+        # ====================================================
+        # CO2 VALUE + COLOUR CODING
+        # ====================================================
+        #
+        # Label colour reflects current air quality level
+        # based on configured thresholds. Updates every cycle.
+        #
+        # ====================================================
+
+        if co2 is not None:
+            co2_ppm = int(float(co2))
+            label_co2_value.configure(
+                text=f"{co2_ppm} ppm",
+                text_color=co2_color(co2_ppm)
+            )
 
         if msg is not None:
             label_msg.configure(text=msg)
@@ -538,6 +677,71 @@ def update_dashboard():
                     markersize=3,
                     label="CO2 ppm"
                 )
+
+# ====================================================
+# 1000 PPM THRESHOLD REFERENCE LINE
+# ====================================================
+#
+# A dashed red horizontal line at 1000 ppm marks the
+# standard indoor air quality "ventilate now" level.
+# Drawn across the full visible x range so it does
+# not affect axis auto-scaling.
+#
+# ====================================================
+
+                ax.axhline(
+                    y=CO2_MODERATE,
+                    color="#ff4444",
+                    linewidth=1.2,
+                    linestyle="--",
+                    label=f"{CO2_MODERATE} ppm threshold"
+                )
+
+# ====================================================
+# MIN / MAX ANNOTATION FOR VISIBLE WINDOW
+# ====================================================
+#
+# Annotates the minimum and maximum CO2 values within
+# the current graph window so engineering limits are
+# immediately readable without inspecting the CSV.
+#
+# ====================================================
+
+                if len(df) > 0:
+                    co2_min = df["co2"].min()
+                    co2_max = df["co2"].max()
+                    ts_min  = df.loc[df["co2"].idxmin(), "timestamp"]
+                    ts_max  = df.loc[df["co2"].idxmax(), "timestamp"]
+
+                    ax.annotate(
+                        f"MIN {int(co2_min)} ppm",
+                        xy=(ts_min, co2_min),
+                        xytext=(10, 12),
+                        textcoords="offset points",
+                        color="#00ff99",
+                        fontsize=10,
+                        fontweight="bold",
+                        arrowprops=dict(
+                            arrowstyle="->",
+                            color="#00ff99",
+                            lw=1.2
+                        )
+                    )
+
+                    ax.annotate(
+                        f"MAX {int(co2_max)} ppm",
+                        xy=(ts_max, co2_max),
+                        xytext=(10, -18),
+                        textcoords="offset points",
+                        color="#ff6666",
+                        fontsize=10,
+                        fontweight="bold",
+                        arrowprops=dict(
+                            arrowstyle="->",
+                            color="#ff6666",
+                            lw=1.2
+                        )
+                    )
 
                 ax.legend(
                     facecolor="#3a3a3a",
