@@ -161,7 +161,7 @@ or included Windows executable
 ```text
 dashboard.exe
 ```
-Note: The executable is a packaged version of the Python script. Both files require secrets.h to be in the same directory.
+Note: The executable is a packaged version of the Python script. Both files require `secrets.h` to be in the same directory.
 
 ## Features
 
