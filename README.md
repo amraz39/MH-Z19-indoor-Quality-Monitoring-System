@@ -144,7 +144,7 @@ The project uses an older local Blynk server version running on Raspberry Pi 5.
 Example configuration:
 
 ```cpp
-char server[] = "192.168.3.9";
+char server[] = "192.168.xxx.xxx";
 #define MY_BLYNK_PORT 8084
 ```
 
@@ -157,6 +157,11 @@ File:
 ```text
 dashboard.py
 ```
+or included Windows executable 
+```text
+dashboard.exe
+```
+Note: The executable is a packaged version of the Python script. Both files require secrets.h to be in the same directory.
 
 ## Features
 
@@ -201,6 +206,10 @@ Install dependencies:
 
 ```bash
 pip install requests pandas matplotlib customtkinter numpy
+```
+or
+```bash
+pip install -r requirements.txt
 ```
 
 ---
