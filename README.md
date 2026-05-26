@@ -223,7 +223,6 @@ project_folder/
 ├── sensorValue6.ino
 ├── secrets.h
 ├── co2_log.csv
-├── engineering_log.txt
 ├── requirements.txt
 └── README.md
 ```
