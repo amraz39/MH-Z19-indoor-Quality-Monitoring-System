@@ -302,11 +302,11 @@ Example:
 
 # CO2 Quality Thresholds
 
-| CO2 ppm   | Quality   |
-| --------- | --------- |
-| <1000     | Good      |
-| 1000–1500 | Ventilate |
-| >1500     | Critical  |
+| CO2 ppm   | Quality         |
+| --------- | --------------- |
+| <1000     | Good            |
+| 1000–1500 | Poor. Ventilate |
+| >1500     | Critical        |
 
 ---
 
@@ -315,7 +315,7 @@ Example:
 | LED    | Condition            |
 | ------ | -------------------- |
 | Green  | Good air             |
-| Orange | Ventilate            |
+| Orange | Poor. Ventilate      |
 | Red    | Critical air quality |
 
 ---
@@ -374,13 +374,13 @@ The firmware includes mitigation logic for these behaviors.
 
 # Version
 
-Dashboard:
+Dashboard (Windows EXE file):
 
 ```text
-v1.5
+v1.7
 ```
 
-Firmware:
+Firmware (Arduino IDE):
 
 ```text
 v. 5/26/2026 by AM

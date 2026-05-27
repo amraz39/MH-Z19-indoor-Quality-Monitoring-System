@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v1.6
+# v1.7
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -267,6 +267,19 @@ def read_virtual_pin(pin):
 
 
 # ============================================================
+# GRAPH CLICK STATE
+# ============================================================
+#
+# Holds the currently displayed DataFrame (filtered to the
+# selected history window) so the click handler can look up
+# temperature, humidity and CO2 for any clicked timestamp.
+# Updated every graph redraw cycle.
+#
+# ============================================================
+
+current_df = None
+
+# ============================================================
 # CO2 COLOUR HELPER
 # ============================================================
 #
@@ -434,6 +447,27 @@ canvas = FigureCanvasTkAgg(figure, master=app)
 canvas.get_tk_widget().pack(fill="both", expand=True, padx=20, pady=20)
 
 # ============================================================
+# GRAPH CLICK INFO LABEL
+# ============================================================
+#
+# Displays sensor values for the point nearest to the click.
+# Shown between the graph and the history selector bar.
+# Updated by on_graph_click() on every mouse click.
+#
+# Format:
+#   🕐 HH:MM:SS  |  🌡 XX.X °C  |  💧 XX.X %  |  CO2: XXXX ppm
+#
+# ============================================================
+
+label_click_info = ctk.CTkLabel(
+    app,
+    text="Click any point on the graph to inspect sensor values",
+    font=("Arial", 16),
+    text_color="gray"
+)
+label_click_info.pack(pady=6)
+
+# ============================================================
 # HISTORY SELECTION
 # ============================================================
 
@@ -499,6 +533,58 @@ label_last_update = ctk.CTkLabel(
     text_color="gray"
 )
 label_last_update.pack(side="right", padx=20)
+
+# ============================================================
+# GRAPH CLICK HANDLER
+# ============================================================
+#
+# Triggered on every mouse click inside the graph axes.
+#
+# Steps:
+#   1. Reject clicks outside the axes (no xdata)
+#   2. Convert matplotlib float x to a Python datetime
+#   3. Find the row in current_df with the nearest timestamp
+#   4. Update label_click_info with that row's sensor values
+#
+# Uses absolute timedelta difference so it works correctly
+# regardless of click direction or data density.
+#
+# ============================================================
+
+def on_graph_click(event):
+    """
+    Handle mouse click on the graph canvas.
+    Find the nearest logged data point and display its values.
+    """
+
+    global current_df
+
+    # Ignore clicks outside the axes area
+    if event.xdata is None or current_df is None or len(current_df) == 0:
+        return
+
+    # Convert matplotlib float timestamp to datetime
+    click_dt = mdates.num2date(event.xdata).replace(tzinfo=None)
+
+    # Find the row whose timestamp is closest to the click
+    deltas = (current_df["timestamp"] - click_dt).abs()
+    nearest_idx = deltas.idxmin()
+    row = current_df.loc[nearest_idx]
+
+    ts   = row["timestamp"].strftime("%H:%M:%S")
+    temp = f"{row['temperature']:.1f}"
+    hum  = f"{row['humidity']:.1f}"
+    co2  = int(row["co2"])
+
+    label_click_info.configure(
+        text=f"🕐 {ts}    |    🌡 {temp} °C    |    💧 {hum} %    |    CO2: {co2} ppm",
+        text_color=co2_color(co2)
+    )
+
+    log_txt(f"GRAPH CLICK: ts={ts} temp={temp} hum={hum} co2={co2}")
+
+
+canvas.mpl_connect("button_press_event", on_graph_click)
 
 # ============================================================
 # UPDATE LOOP
@@ -632,6 +718,10 @@ def update_dashboard():
                 cutoff = datetime.now() - timedelta(hours=hours)
 
                 df = df[df["timestamp"] >= cutoff]
+
+                # Keep a reference so on_graph_click() can look up values
+                global current_df
+                current_df = df.copy()
 
                 ax.clear()
 
