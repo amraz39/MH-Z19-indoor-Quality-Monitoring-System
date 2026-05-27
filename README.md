@@ -261,6 +261,12 @@ or
 dashboard.exe
 ```
 
+
+<p align="center">
+  <img src="dashboard_screenshot.jpg" alt="Dashboard Screenshot" width="700"/>
+</p>
+
+
 ---
 
 # Dashboard Features
