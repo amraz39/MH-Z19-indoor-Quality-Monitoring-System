@@ -184,12 +184,21 @@ Supported ranges:
 
 ### Logging
 
-Two log files are generated:
+Two log files are generated from real-time sensor data pulled from the Blynk server:
 
 | File                  | Purpose                        |
 | --------------------- | ------------------------------ |
 | `co2_log.csv`         | Historical sensor values       |
 | `engineering_log.txt` | Diagnostic and connection logs |
+
+### Historical Data Output from Blynk Server
+
+Two historical CO2 sensor data files generated from the historical data (binary format) pulled from the Blynk server:
+
+| File  (example file name)                       | Purpose                                               |
+| ----------------------------------------------- | ----------------------------------------------------- |
+| `blynk_history_co2_20260528_202749.txt`         | Historical CO2 data from Blynk server in TXT format   |
+| `blynk_history_export_20260528_202749.csv`      | Historical CO2 data from Blynk server in CSV format   |
 
 ### Dark Theme
 
@@ -220,6 +229,7 @@ pip install -r requirements.txt
 project_folder/
 │
 ├── dashboard.py
+├── dashboard.exe
 ├── sensorValue6.ino
 ├── secrets.h
 ├── co2_log.csv
@@ -263,7 +273,7 @@ dashboard.exe
 
 
 <p align="center">
-  <img src="dashboard_screenshot.jpg" alt="Dashboard Screenshot" width="700"/>
+  <img src="dashboard_screenshot.jpg" alt="Dashboard Screenshot" width="900"/>
 </p>
 
 

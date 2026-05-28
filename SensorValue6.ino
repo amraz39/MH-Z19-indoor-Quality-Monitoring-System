@@ -25,7 +25,7 @@
  *
  * Blynk library installed in Arduio must be 0.6.1
  *
- * v. 5/26/2026 by AM
+ * v. 5/28/2026 by AM
  *
  * ============================================================
  * ORIGINAL BUG FIXES
@@ -160,7 +160,7 @@
  *   [RATE_REJECT]
  *      Physically impossible ppm jump rejected.
  * 
- *   [RETEE_RECOVERY]
+ *   [RATE_RECOVERY]
  *      Protection system detected deadlock and recovered automatically
  *
  *   [ABC_RECOVERY]
@@ -304,6 +304,7 @@ bool hadRecentInvalidMeasurement = false;
  */
 
 int rateRejectCounter = 0;
+bool controlledRecoveryActive = false;
 
 /* ============================================================
  * ARRAYS FOR REGRESSION
@@ -643,6 +644,20 @@ void sendUptime()
 
   long rawPPM = readCO2PWM();
 
+  /*
+  * HARD CLAMP
+  *
+  * MH-Z19 should never jump from fresh-air
+  * levels to 5000 ppm in one sample indoors.
+  */
+
+  if (rawPPM > 3000 && lastValidPPM < 1200)
+  {
+    Serial.println("[SANITY] impossible spike rejected");
+
+    rawPPM = -1;
+  }
+
   bool validMeasurement = (rawPPM >= 0);
 
   if (validMeasurement && firstStepDone)
@@ -662,78 +677,71 @@ void sendUptime()
       Serial.println(rateRejectCounter);
 
       /*
-       * RATE RECOVERY LOGIC
-       *
-       * Short spikes should still be rejected.
-       *
-       * But if many consecutive measurements are
-       * rejected, the system may be stuck using
-       * stale lastValidPPM forever.
-       *
-       * After several consecutive rejects,
-       * temporarily trust new measurements again.
-       */
+      * CONTROLLED RECOVERY
+      *
+      * If many consecutive measurements disagree with
+      * the stored baseline, the baseline itself is
+      * probably corrupted.
+      *
+      * Slowly move toward new measurements instead
+      * of instantly trusting them.
+      */
 
-      if (rateRejectCounter < 6)
+      if (rateRejectCounter >= 6)
       {
-        validMeasurement = false;
-      }
-      else
-      {
-        Serial.println("[RATE] recovery unlock");
+        Serial.println("[RATE] controlled recovery");
 
         diagState = "RATE_RECOVERY";
 
-        validMeasurement = true;
+        /*
+        * Move baseline slowly toward reality
+        */
 
-        rateRejectCounter = 0;
+        lastValidPPM =
+            lastValidPPM * 0.85f +
+            rawPPM       * 0.15f;
+
+        ppm5 = lastValidPPM;
+
+        controlledRecoveryActive = true;
+
+        validMeasurement = true;
+      }
+      /*
+      * Reject temporary unrealistic jump.
+      */
+      else
+      {
+        validMeasurement = false;
       }
     }
     else
     {
       /*
-       * Normal valid measurement.
-       *
-       * Reset reject counter.
-       */
+      * Measurement looks physically plausible again.
+      */
 
       rateRejectCounter = 0;
+
+      controlledRecoveryActive = false;
     }
   }
 
   if (validMeasurement)
   {
-    if (detectABCDisturbance(rawPPM))
+    /*
+    * During controlled recovery we already updated
+    * lastValidPPM gradually.
+    *
+    * Avoid instantly overwriting it with rawPPM.
+    */
+
+    if (!controlledRecoveryActive)
     {
-      abcRecoveryMode = true;
+      ppm5 = rawPPM;
 
-      abcRecoveryStart = millis();
-
-      stableRecoveryCounter = 0;
-
-      validMeasurement = false;
+      lastValidPPM = ppm5;
     }
-  }
-
-  if (abcRecoveryMode)
-  {
-    Serial.println("[ABC] recovery mode active");
-
-    validMeasurement = false;
-
-    if ((millis() - abcRecoveryStart) > 7200000UL)
-    {
-      Serial.println("[ABC] forced recovery timeout");
-
-      abcRecoveryMode = false;
-    }
-  }
-
-  if (validMeasurement)
-  {
-    ppm5 = rawPPM;
-
-    lastValidPPM = ppm5;
 
     updateDailyMinimum(ppm5);
 
@@ -745,14 +753,30 @@ void sendUptime()
     }
     else
     {
-      diagState = "OK";
+      if (!controlledRecoveryActive)
+      {
+        diagState = "OK";
+      }
     }
 
     if (firstStepDone)
     {
-      smoothPPM =
-          smoothPPM * 0.7f +
-          ppm5      * 0.3f;
+      /*
+      * Conservative smoothing during recovery.
+      */
+
+      if (controlledRecoveryActive)
+      {
+        smoothPPM =
+            smoothPPM * 0.90f +
+            ppm5      * 0.10f;
+      }
+      else
+      {
+        smoothPPM =
+            smoothPPM * 0.7f +
+            ppm5      * 0.3f;
+      }
     }
     else
     {

@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v1.7
+# v1.8
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -109,6 +109,7 @@
 import os
 import re
 import requests
+import csv
 import pandas as pd
 import customtkinter as ctk
 
@@ -264,6 +265,283 @@ def read_virtual_pin(pin):
     except Exception as e:
         log_txt(f"PIN V{pin} ERROR: {e}")
         return None
+
+
+# ============================================================
+# DOWNLOAD HISTORICAL DATA FROM BLYNK SERVER
+# ============================================================
+#
+# Downloads readable historical graph data from the local
+# Blynk server and converts timestamps into human-readable
+# date/time format.
+#
+# Older Blynk servers return history lines like:
+#
+#   value,timestamp,flag
+#
+# Example:
+#
+#   760.4,1777566480000,0
+#
+# Which means:
+#
+#   CO2 ppm = 760.4
+#   timestamp = unix milliseconds
+#
+# ============================================================
+
+def download_blynk_history():
+    """
+    Download historical graph data from local Blynk server.
+
+    Handles:
+      - gzip-compressed responses
+      - plain text responses
+      - converts timestamps to readable date/time
+      - exports readable TXT + CSV files
+    """
+
+    import gzip
+
+    try:
+
+        log_txt("Starting historical data download")
+
+        pins = {
+            "temperature": 10,
+            "humidity": 11,
+            "co2": 12
+        }
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # ====================================================
+        # GLOBAL CSV EXPORT
+        # ====================================================
+
+        csv_file = f"blynk_history_export_{timestamp}.csv"
+
+        rows_written = 0
+
+        with open(csv_file, "w", newline="", encoding="utf-8") as csvf:
+
+            writer = csv.writer(csvf)
+
+            writer.writerow([
+                "sensor",
+                "date_time",
+                "value"
+            ])
+
+            # ====================================================
+            # DOWNLOAD EACH SENSOR
+            # ====================================================
+
+            for sensor_name, pin in pins.items():
+
+                try:
+
+                    url = (
+                        f"http://{BLYNK_SERVER}:{BLYNK_PORT}/"
+                        f"{AUTH_TOKEN}/data/V{pin}"
+                    )
+
+                    log_txt(f"Downloading history from: {url}")
+
+                    response = requests.get(url, timeout=30)
+
+                    log_txt(
+                        f"HTTP STATUS V{pin}: "
+                        f"{response.status_code}"
+                    )
+
+                    if response.status_code != 200:
+
+                        log_txt(
+                            f"Failed to download V{pin}"
+                        )
+
+                        continue
+
+                    # ====================================================
+                    # TRY GZIP DECOMPRESSION
+                    # ====================================================
+
+                    try:
+
+                        text = gzip.decompress(
+                            response.content
+                        ).decode(
+                            "utf-8",
+                            errors="ignore"
+                        )
+
+                        log_txt(
+                            f"V{pin} decompressed using gzip"
+                        )
+
+                    except Exception:
+
+                        text = response.text
+
+                        log_txt(
+                            f"V{pin} was plain text"
+                        )
+
+                    # ====================================================
+                    # DEBUG OUTPUT
+                    # ====================================================
+
+                    log_txt(
+                        f"FIRST 500 CHARS:\n{text[:500]}"
+                    )
+
+                    # ====================================================
+                    # TXT FILE
+                    # ====================================================
+
+                    txt_file = (
+                        f"blynk_history_"
+                        f"{sensor_name}_"
+                        f"{timestamp}.txt"
+                    )
+
+                    with open(
+                        txt_file,
+                        "w",
+                        encoding="utf-8"
+                    ) as txtf:
+
+                        txtf.write(
+                            f"===== "
+                            f"{sensor_name.upper()} HISTORY "
+                            f"=====\n\n"
+                        )
+
+                        # ====================================================
+                        # PARSE HISTORY LINES
+                        # ====================================================
+
+                        lines = text.splitlines()
+
+                        log_txt(
+                            f"{sensor_name} returned "
+                            f"{len(lines)} lines"
+                        )
+
+                        sensor_rows = 0
+
+                        for line in lines:
+
+                            line = line.strip()
+
+                            if not line:
+                                continue
+
+                            parts = line.split(",")
+
+                            # Expected:
+                            # value,timestamp,flag
+
+                            if len(parts) < 2:
+
+                                log_txt(
+                                    f"Skipping malformed line: "
+                                    f"{line}"
+                                )
+
+                                continue
+
+                            try:
+
+                                value = float(parts[0])
+
+                                ts_ms = int(parts[1])
+
+                                # ============================================
+                                # CONVERT UNIX MS -> READABLE DATETIME
+                                # ============================================
+
+                                dt = datetime.fromtimestamp(
+                                    ts_ms / 1000
+                                )
+
+                                dt_str = dt.strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
+
+                                # ============================================
+                                # HUMAN READABLE TXT LINE
+                                # ============================================
+
+                                readable_line = (
+                                    f"{dt_str}    "
+                                    f"{value:.2f}"
+                                )
+
+                                txtf.write(
+                                    readable_line + "\n"
+                                )
+
+                                # ============================================
+                                # CSV EXPORT
+                                # ============================================
+
+                                writer.writerow([
+                                    sensor_name,
+                                    dt_str,
+                                    f"{value:.2f}"
+                                ])
+
+                                rows_written += 1
+                                sensor_rows += 1
+
+                            except Exception as e:
+
+                                log_txt(
+                                    f"Parse error: "
+                                    f"{line} -> {e}"
+                                )
+
+                        log_txt(
+                            f"{sensor_name}: "
+                            f"{sensor_rows} rows exported"
+                        )
+
+                    log_txt(
+                        f"Saved history TXT: {txt_file}"
+                    )
+
+                except Exception as e:
+
+                    log_txt(
+                        f"Sensor download error "
+                        f"{sensor_name}: {e}"
+                    )
+
+        log_txt(
+            f"History export complete. "
+            f"Rows written: {rows_written}"
+        )
+
+        label_click_info.configure(
+            text=(
+                f"History exported successfully: "
+                f"{csv_file}"
+            ),
+            text_color="#00ff99"
+        )
+
+    except Exception as e:
+
+        log_txt(
+            f"HISTORY DOWNLOAD ERROR: {e}"
+        )
+
+        label_click_info.configure(
+            text=f"History download failed: {e}",
+            text_color="#ff4444"
+        )
 
 
 # ============================================================
@@ -494,6 +772,31 @@ label_hist_desc = ctk.CTkLabel(
     text="Hours (168h = 7 days)"
 )
 label_hist_desc.pack(side="left", padx=10)
+
+
+# ============================================================
+# HISTORY DOWNLOAD BUTTON
+# ============================================================
+#
+# Downloads historical graph data stored internally on the
+# Blynk server and exports it to CSV/TXT files.
+#
+# Useful when:
+#
+#   - dashboard logging was not running
+#   - ESP32 was offline
+#   - Blynk mobile app still shows graph history
+#
+# ============================================================
+
+button_download_history = ctk.CTkButton(
+    frame_bottom,
+    text="Download Server History",
+    command=download_blynk_history
+)
+
+button_download_history.pack(side="left", padx=20)
+
 
 # ============================================================
 # CONNECTION STATUS INDICATOR
