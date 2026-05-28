@@ -393,13 +393,13 @@ The firmware includes mitigation logic for these behaviors.
 Dashboard (Windows EXE file):
 
 ```text
-v1.7
+v1.8
 ```
 
 Firmware (Arduino IDE):
 
 ```text
-v. 5/26/2026 by AM
+v. 5/28/2026 by AM
 ```
 
 ---
