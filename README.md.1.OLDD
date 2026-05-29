@@ -388,67 +388,6 @@ The firmware includes mitigation logic for these behaviors.
 
 ---
 
-
-### Advanced Dashboard Features
-
-The current dashboard implementation additionally includes:
-
-* Live connection status indicator (`CONNECTED` / `OFFLINE`)
-* Last successful update timestamp
-* Clickable graph inspection for historical sensor values
-* CO2 threshold reference line at 1000 ppm
-* Automatic min/max CO2 annotations for visible graph range
-* Dynamic CO2 colour coding by air quality level
-* Smart adaptive timestamp formatting
-* Exactly 6 evenly spaced graph time ticks
-* Automatic dark-theme reapplication after graph redraw
-* Historical data export directly from the Blynk server
-* Automatic gzip decompression support for old Blynk history responses
-* Human-readable TXT exports from binary Blynk history storage
-* CSV export of downloaded Blynk history
-* Startup diagnostics and connectivity testing
-* Detailed engineering TXT logging for HTTP requests and parsing operations
-
-### Graph Interaction
-
-The dashboard graph supports direct mouse interaction.
-
-Clicking any point on the graph displays:
-
-* Timestamp
-* Temperature
-* Humidity
-* CO2 ppm value
-
-The dashboard automatically finds the nearest logged data point to the click position.
-
-### Historical Export Files
-
-The dashboard can download historical sensor data stored internally on the Blynk server even if the dashboard was not running at the time.
-
-Additional generated files may include:
-
-| File Example | Purpose |
-| --- | --- |
-| `blynk_history_temperature_YYYYMMDD_HHMMSS.txt` | Human-readable temperature history |
-| `blynk_history_humidity_YYYYMMDD_HHMMSS.txt` | Human-readable humidity history |
-| `blynk_history_co2_YYYYMMDD_HHMMSS.txt` | Human-readable CO2 history |
-| `blynk_history_export_YYYYMMDD_HHMMSS.csv` | Combined CSV export for all sensors |
-
-### Dashboard Connection Diagnostics
-
-The dashboard logs:
-
-* HTTP request status codes
-* Raw Blynk virtual pin responses
-* Graph update cycles
-* Parsing failures
-* Connection failures
-* Sensor download failures
-* Startup diagnostics
-* Historical export operations
-
-
 # Version
 
 Dashboard (Windows EXE file):
@@ -460,7 +399,7 @@ v1.8
 Firmware (Arduino IDE):
 
 ```text
-v. 5/29/2026 by AM
+v. 5/28/2026 by AM
 ```
 
 ---
