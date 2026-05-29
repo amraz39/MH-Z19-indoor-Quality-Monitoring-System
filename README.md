@@ -449,6 +449,109 @@ The dashboard logs:
 * Historical export operations
 
 
+# Industrial Protection Logic
+
+The firmware implements additional industrial-style protection and validation systems designed to improve long-term stability of the MH-Z19 sensor under noisy real-world operating conditions.
+
+These systems are intended to reduce:
+
+* false ppm spikes
+* corrupted PWM timing reads
+* WiFi-induced measurement instability
+* automatic baseline calibration disturbances
+* deadlocked recovery states
+* unstable startup behaviour
+* graph corruption caused by invalid sensor values
+
+## PWM Synchronization Protection
+
+The firmware synchronizes to complete PWM cycles before calculating ppm values.
+
+This prevents:
+
+* partial pulse reads
+* corrupted timing windows
+* invalid duty-cycle calculations
+
+## Full-Cycle Timing Validation
+
+Every PWM measurement cycle is validated for:
+
+* HIGH pulse timeout
+* LOW pulse timeout
+* impossible cycle duration
+* corrupted pulse structure
+
+Invalid cycles are rejected before ppm conversion.
+
+## Rate-of-Change Rejection Logic
+
+The firmware rejects physically impossible ppm jumps between consecutive readings.
+
+Examples:
+
+* sudden spikes caused by WiFi interrupts
+* corrupted pulse timing
+* transient electrical noise
+
+This protection prevents graph corruption and unstable dashboard behaviour.
+
+## Automatic Recovery State Machine
+
+The firmware includes automatic multi-stage recovery handling.
+
+Recovery modes include:
+
+| Recovery Mode | Purpose |
+| --- | --- |
+| `RATE_RECOVERY` | Recover from repeated rejected spikes |
+| `ABC_RECOVERY` | Stabilize after MH-Z19 automatic baseline recalibration |
+| `SENSOR_RECOVERY` | Temporary fallback handling during unstable reads |
+| `OK_RECOVERED` | Return-to-normal stabilization confirmation |
+
+## WiFi Coexistence Protection
+
+ESP8266 WiFi activity can interfere with precise PWM timing measurements.
+
+The firmware includes timing mitigation logic to reduce:
+
+* PWM jitter
+* invalid pulse reads
+* corrupted ppm calculations during RF activity
+
+## Baseline Drift Validation
+
+The firmware monitors long-term baseline behaviour to detect:
+
+* unrealistic daily baseline shifts
+* unstable recalibration events
+* abnormal sensor drift
+
+## Startup Stabilization Logic
+
+During boot, the firmware enters a controlled stabilization phase before reporting normal operational status.
+
+This avoids:
+
+* invalid startup ppm values
+* unstable warm-up measurements
+* false alarms immediately after power-on
+
+## Industrial Logging Philosophy
+
+The system was designed using engineering-style diagnostics where failures are explicitly logged rather than silently ignored.
+
+Diagnostic logging includes:
+
+* sensor timing failures
+* recovery state transitions
+* WiFi reconnect attempts
+* Blynk reconnect events
+* parsing failures
+* graph update diagnostics
+* historical export diagnostics
+
+
 # Version
 
 Dashboard (Windows EXE file):
@@ -460,7 +563,7 @@ v1.8
 Firmware (Arduino IDE):
 
 ```text
-v. 5/29/2026 by AM
+v. 5/28/2026 by AM
 ```
 
 ---
