@@ -877,7 +877,8 @@ def on_graph_click(event):
     ts   = row["timestamp"].strftime("%H:%M:%S")
     temp = f"{row['temperature']:.1f}"
     hum  = f"{row['humidity']:.1f}"
-    co2  = int(row["co2"])
+    #co2  = int(row["co2"])
+    co2 = round(float(row["co2"]), 1)
 
     label_click_info.configure(
         text=f"🕐 {ts}    |    🌡 {temp} °C    |    💧 {hum} %    |    CO2: {co2} ppm",
@@ -962,7 +963,8 @@ def update_dashboard():
         # ====================================================
 
         if co2 is not None:
-            co2_ppm = int(float(co2))
+            #co2_ppm = int(float(co2))
+            co2_ppm = round(float(co2), 1)
             label_co2_value.configure(
                 text=f"{co2_ppm} ppm",
                 text_color=co2_color(co2_ppm)
