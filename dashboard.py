@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v1.8
+# v1.9
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -62,6 +62,9 @@
  - Min / Max CO2 annotation for visible window
  - Connection status indicator
  - Last updated timestamp
+ - Zero calibration trigger button
+ - ABC enable/disable button with 3-state colour indicator
+ - UART CO2 cross-check vs PWM with delta warning
 
 ============================================================
  REQUIRED FILES
@@ -89,8 +92,28 @@
 
  V10 = temperature
  V11 = humidity
- V12 = CO2 ppm
+ V12 = CO2 ppm  (PWM reading)
  V3  = engineering message
+
+ V13 = CO2 ppm  (UART reading — requires INO support)
+ V20 = zero calibration trigger (write 1 — requires INO support)
+ V21 = ABC state  (read: 1=enabled 0=disabled;
+                   write: 1=enable 0=disable — requires INO support)
+
+============================================================
+ INO REQUIREMENTS FOR NEW FEATURES
+============================================================
+
+ The following BLYNK_WRITE handlers must be added to the INO:
+
+   BLYNK_WRITE(V20)  — on value 1: trigger zero calibration
+   BLYNK_WRITE(V21)  — on value 1: enable ABC
+                        on value 0: disable ABC
+
+ The following must be written each cycle from the INO:
+
+   Blynk.virtualWrite(13, uartPPM);   // UART CO2 reading
+   Blynk.virtualWrite(21, abcEnabled ? 1 : 0);  // ABC state
 
 ============================================================
  CO2 AIR QUALITY THRESHOLDS
@@ -114,6 +137,7 @@ import pandas as pd
 import customtkinter as ctk
 
 from datetime import datetime, timedelta
+from tkinter import messagebox
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -153,6 +177,33 @@ CO2_COLOR_MODERATE = "#ffd700"
 CO2_COLOR_POOR     = "#ff8800"
 CO2_COLOR_BAD      = "#ff2222"
 CO2_COLOR_DEFAULT  = "white"
+
+# ============================================================
+# CALIBRATION VIRTUAL PIN ASSIGNMENTS
+# ============================================================
+#
+# These virtual pins require matching BLYNK_WRITE handlers
+# and Blynk.virtualWrite() calls in the INO sketch.
+# See the INO REQUIREMENTS section in the header docstring.
+#
+# ============================================================
+
+V_CO2_UART  = 13   # UART CO2 reading sent each cycle by INO
+V_ZERO_CAL  = 20   # write 1 to trigger zero calibration
+V_ABC_STATE = 21   # read 1=enabled/0=disabled; write to toggle
+
+# ============================================================
+# UART CROSS-CHECK THRESHOLD
+# ============================================================
+#
+# Minimum ppm difference between PWM and UART readings before
+# a warning is shown. Small differences (< threshold) are
+# considered normal sensor noise and displayed quietly.
+# Larger differences indicate a calibration problem.
+#
+# ============================================================
+
+UART_DIFF_THRESHOLD = 50   # ppm
 
 # ============================================================
 # READ AUTH TOKEN FROM secrets.h
@@ -268,7 +319,44 @@ def read_virtual_pin(pin):
 
 
 # ============================================================
-# DOWNLOAD HISTORICAL DATA FROM BLYNK SERVER
+# BLYNK API — WRITE VIRTUAL PIN
+# ============================================================
+#
+# Sends a value to a virtual pin on the local Blynk server.
+# Used for:
+#   - zero calibration trigger  (V20)
+#   - ABC enable / disable      (V21)
+#
+# Older Blynk local servers use:
+#
+#   /AUTH_TOKEN/update/Vx?value=y
+#
+# ============================================================
+
+def write_virtual_pin(pin, value):
+    """
+    Write a value to a virtual pin on the local Blynk server.
+    Returns True on success, False on failure.
+    """
+
+    url = (
+        f"http://{BLYNK_SERVER}:{BLYNK_PORT}/"
+        f"{AUTH_TOKEN}/update/V{pin}"
+        f"?value={value}"
+    )
+
+    try:
+        response = requests.get(url, timeout=5)
+
+        log_txt(
+            f"HTTP GET {url} -> {response.status_code}"
+        )
+
+        return response.status_code == 200
+
+    except Exception as e:
+        log_txt(f"PIN V{pin} WRITE ERROR: {e}")
+        return False
 # ============================================================
 #
 # Downloads readable historical graph data from the local
@@ -582,6 +670,302 @@ def co2_color(ppm):
 
 
 # ============================================================
+# ABC STATE TRACKING
+# ============================================================
+#
+# Tracks the current ABC (Automatic Baseline Calibration)
+# state as reported by the INO via V21.
+#
+# Values:
+#   "unknown"   — not yet queried, or V21 returned None
+#   "enabled"   — V21 returned "1"
+#   "disabled"  — V21 returned "0"
+#
+# The ABC button colour reflects this state:
+#   gray   — unknown
+#   green  — enabled
+#   red    — disabled
+#
+# ============================================================
+
+abc_state = "unknown"
+
+# Counter used inside update_dashboard() to refresh the ABC
+# state periodically without adding a separate timer.
+# Refreshes every 12 cycles (= every ~60 seconds at 5s interval).
+
+abc_refresh_counter = 0
+ABC_REFRESH_EVERY   = 12
+
+# ============================================================
+# UART AVAILABILITY FLAG
+# ============================================================
+#
+# Set to True when V13 returns a valid numeric CO2 reading,
+# confirming that:
+#   - the two UART wires are physically connected
+#   - the INO is writing UART CO2 data to V13
+#
+# While False:
+#   - Zero Calibration button is gray and disabled
+#   - ABC button is gray and disabled
+#   - UART cross-check label shows "UART: not wired"
+#
+# Checked at startup and every ~60 seconds.
+# Automatically enables buttons the moment UART is detected.
+#
+# ============================================================
+
+uart_available = False
+
+
+def _apply_abc_button_style():
+    """
+    Update button_abc colour and label to match abc_state.
+    Safe to call at any time after button_abc is created.
+    """
+
+    global abc_state
+
+    if abc_state == "enabled":
+        button_abc.configure(
+            text="ABC: ON",
+            fg_color="#1a6b2e",
+            hover_color="#2a8b3e"
+        )
+    elif abc_state == "disabled":
+        button_abc.configure(
+            text="ABC: OFF",
+            fg_color="#6b1a1a",
+            hover_color="#8b2a2a"
+        )
+    else:
+        button_abc.configure(
+            text="ABC: ?",
+            fg_color="gray40",
+            hover_color="gray50"
+        )
+
+
+def refresh_abc_state():
+    """
+    Query V21 from the Blynk server and update abc_state
+    and the button colour accordingly.
+    """
+
+    global abc_state
+
+    val = read_virtual_pin(V_ABC_STATE)
+
+    if val == "1":
+        abc_state = "enabled"
+        log_txt("ABC state: ENABLED")
+    elif val == "0":
+        abc_state = "disabled"
+        log_txt("ABC state: DISABLED")
+    else:
+        abc_state = "unknown"
+        log_txt(f"ABC state: UNKNOWN (raw={val})")
+
+    _apply_abc_button_style()
+
+
+def toggle_abc():
+    """
+    Toggle ABC state.
+
+    If currently enabled  → write 0 to V21 (disable).
+    If currently disabled → write 1 to V21 (enable).
+    If unknown            → write 1 to V21 (enable as safe default).
+
+    Updates button colour immediately on successful write,
+    then re-reads V21 to confirm.
+    """
+
+    global abc_state
+
+    if abc_state == "enabled":
+        new_value = 0
+        action    = "DISABLE"
+    else:
+        new_value = 1
+        action    = "ENABLE"
+
+    log_txt(f"ABC toggle: sending {action} (value={new_value})")
+
+    ok = write_virtual_pin(V_ABC_STATE, new_value)
+
+    if ok:
+        log_txt(f"ABC toggle: write succeeded, refreshing state")
+        refresh_abc_state()
+    else:
+        log_txt("ABC toggle: write FAILED")
+        label_click_info.configure(
+            text="ABC toggle failed — check server connection",
+            text_color="#ff4444"
+        )
+
+
+def trigger_zero_calibration():
+    """
+    Trigger MH-Z19 zero calibration via V20.
+
+    Shows a confirmation dialog before sending.
+    Zero calibration requires the sensor to be in fresh
+    outdoor air (~400 ppm) for at least 20 minutes first.
+    """
+
+    confirmed = messagebox.askyesno(
+        title="Zero Calibration",
+        message=(
+            "Are you sure you want to trigger ZERO CALIBRATION?\n\n"
+            "Requirements before proceeding:\n"
+            "  • Sensor must be in fresh outdoor air\n"
+            "  • At least 20 minutes at ~400 ppm\n\n"
+            "Calibrating indoors will corrupt the sensor baseline."
+        )
+    )
+
+    if not confirmed:
+        log_txt("Zero calibration cancelled by user")
+        return
+
+    log_txt("Zero calibration: sending trigger to V20")
+
+    ok = write_virtual_pin(V_ZERO_CAL, 1)
+
+    if ok:
+        log_txt("Zero calibration: trigger sent successfully")
+        label_click_info.configure(
+            text="✓ Zero calibration triggered — sensor is recalibrating",
+            text_color="#00cc44"
+        )
+    else:
+        log_txt("Zero calibration: write FAILED")
+        label_click_info.configure(
+            text="Zero calibration failed — check server connection",
+            text_color="#ff4444"
+        )
+
+
+# ============================================================
+# UART BUTTON ENABLE / DISABLE HELPERS
+# ============================================================
+#
+# Called when UART availability changes.
+# These are the only places that change button state
+# (normal / disabled) so the logic stays in one place.
+#
+# ============================================================
+
+def _enable_uart_buttons():
+    """
+    Activate Zero Calibration and ABC buttons.
+    Called when V13 first returns a valid reading.
+    Also triggers an immediate ABC state refresh.
+    """
+
+    log_txt("UART detected — enabling calibration buttons")
+
+    button_zero_cal.configure(
+        fg_color="#555500",
+        hover_color="#888800",
+        state="normal"
+    )
+
+    # ABC button state is set by refresh_abc_state()
+    button_abc.configure(state="normal")
+
+    # Immediately read actual ABC state from INO
+    refresh_abc_state()
+
+
+def _disable_uart_buttons():
+    """
+    Gray out and disable Zero Calibration and ABC buttons.
+    Called at startup and if UART signal is lost.
+    """
+
+    log_txt("UART unavailable — disabling calibration buttons")
+
+    button_zero_cal.configure(
+        fg_color="gray40",
+        hover_color="gray50",
+        state="disabled"
+    )
+
+    button_abc.configure(
+        text="ABC: ?",
+        fg_color="gray40",
+        hover_color="gray50",
+        state="disabled"
+    )
+
+    label_co2_uart.configure(
+        text="UART: not wired",
+        text_color="gray"
+    )
+
+
+# ============================================================
+# UART AVAILABILITY CHECK
+# ============================================================
+#
+# Reads V13 and checks whether the INO is writing valid
+# UART CO2 data. Enables or disables buttons accordingly.
+#
+# Logic:
+#   V13 = None      → not wired, keep / set disabled
+#   V13 = number    → wired and working, enable buttons
+#
+# Transition events:
+#   unavailable → available : enable buttons, read ABC state
+#   available → unavailable : disable buttons
+#   no change               : reapply current state (idempotent)
+#
+# Called at startup and every ~60 seconds from update loop.
+#
+# ============================================================
+
+def check_uart_availability():
+    """
+    Query V13, update uart_available, enable/disable buttons.
+    """
+
+    global uart_available
+
+    val = read_virtual_pin(V_CO2_UART)
+
+    # Valid UART signal: V13 must return a parseable number
+    is_available = False
+
+    if val is not None:
+        try:
+            float(val)
+            is_available = True
+        except (ValueError, TypeError):
+            pass
+
+    if is_available and not uart_available:
+        # New: UART just became available
+        uart_available = True
+        _enable_uart_buttons()
+
+    elif not is_available and uart_available:
+        # New: UART just went away
+        uart_available = False
+        _disable_uart_buttons()
+
+    elif not is_available:
+        # Still unavailable — reapply disabled state (idempotent)
+        _disable_uart_buttons()
+
+    else:
+        # Still available — refresh ABC state only
+        refresh_abc_state()
+
+
+# ============================================================
 # GUI
 # ============================================================
 
@@ -675,6 +1059,28 @@ label_co2_value = ctk.CTkLabel(
     text_color=CO2_COLOR_DEFAULT
 )
 label_co2_value.pack(pady=30)
+
+# ============================================================
+# CO2 UART CROSS-CHECK LABEL
+# ============================================================
+#
+# Shows the UART CO2 reading directly below the main PWM
+# value for easy side-by-side comparison.
+#
+# States:
+#   gray     "UART: N/A"              — V13 not available
+#   green    "UART: XXX ppm ✓"        — within threshold
+#   orange   "UART: XXX ppm  ⚠ Δ+YY" — significant difference
+#
+# ============================================================
+
+label_co2_uart = ctk.CTkLabel(
+    frame_co2,
+    text="UART: N/A",
+    font=("Arial", 16),
+    text_color="gray"
+)
+label_co2_uart.pack(pady=4)
 
 # ============================================================
 # MESSAGE
@@ -797,6 +1203,65 @@ button_download_history = ctk.CTkButton(
 
 button_download_history.pack(side="left", padx=20)
 
+# ============================================================
+# ZERO CALIBRATION BUTTON
+# ============================================================
+#
+# Sends a calibration trigger to the sensor via V20.
+# Shows a confirmation dialog before sending to prevent
+# accidental calibration while indoors.
+#
+# STARTS DISABLED (gray) until UART signal is confirmed on
+# V13 — meaning the two UART wires are physically connected
+# and the INO is running the UART code.
+#
+# Requires matching BLYNK_WRITE(V20) handler in the INO.
+#
+# ============================================================
+
+button_zero_cal = ctk.CTkButton(
+    frame_bottom,
+    text="Zero Calibration",
+    fg_color="gray40",
+    hover_color="gray50",
+    state="disabled",
+    command=trigger_zero_calibration
+)
+
+button_zero_cal.pack(side="left", padx=10)
+
+# ============================================================
+# ABC STATE BUTTON
+# ============================================================
+#
+# Displays current ABC (Automatic Baseline Calibration) state
+# and toggles it on click.
+#
+# Colour states:
+#   gray   "ABC: ?"    — UART not wired / state unknown
+#   green  "ABC: ON"   — ABC currently enabled
+#   red    "ABC: OFF"  — ABC currently disabled
+#
+# STARTS DISABLED (gray) until UART signal is confirmed on
+# V13. Once UART is detected, the actual ABC state is read
+# from V21 and the button colour updates accordingly.
+# Refreshed every ~60 seconds.
+#
+# Requires matching BLYNK_WRITE(V21) handler in the INO.
+#
+# ============================================================
+
+button_abc = ctk.CTkButton(
+    frame_bottom,
+    text="ABC: ?",
+    fg_color="gray40",
+    hover_color="gray50",
+    state="disabled",
+    command=toggle_abc
+)
+
+button_abc.pack(side="left", padx=10)
+
 
 # ============================================================
 # CONNECTION STATUS INDICATOR
@@ -918,10 +1383,11 @@ def update_dashboard():
     try:
         log_txt("Starting sensor acquisition cycle")
 
-        temp = read_virtual_pin(10)
-        hum  = read_virtual_pin(11)
-        co2  = read_virtual_pin(12)
-        msg  = read_virtual_pin(3)
+        temp     = read_virtual_pin(10)
+        hum      = read_virtual_pin(11)
+        co2      = read_virtual_pin(12)
+        msg      = read_virtual_pin(3)
+        co2_uart = read_virtual_pin(V_CO2_UART)
 
         if temp is not None:
             label_temp_value.configure(text=f"{float(temp):.1f} °C")
@@ -963,12 +1429,89 @@ def update_dashboard():
         # ====================================================
 
         if co2 is not None:
-            #co2_ppm = int(float(co2))
             co2_ppm = round(float(co2), 1)
             label_co2_value.configure(
                 text=f"{co2_ppm} ppm",
                 text_color=co2_color(co2_ppm)
             )
+
+# ====================================================
+# UART CO2 CROSS-CHECK
+# ====================================================
+#
+# Compares PWM reading (V12) against UART reading (V13).
+#
+# If the difference exceeds UART_DIFF_THRESHOLD:
+#   - orange warning shown with signed delta
+#   - discrepancy logged to engineering TXT
+#
+# Small differences below threshold are shown quietly
+# in green as confirmation that both paths agree.
+#
+# The delta sign convention:
+#   Δ+ means PWM reads HIGHER than UART
+#   Δ- means PWM reads LOWER  than UART
+#
+# ====================================================
+
+            if co2_uart is not None:
+                try:
+                    co2_uart_ppm = round(float(co2_uart), 1)
+                    diff         = co2_ppm - co2_uart_ppm
+
+                    if abs(diff) >= UART_DIFF_THRESHOLD:
+                        sign = "+" if diff > 0 else ""
+                        label_co2_uart.configure(
+                            text=(
+                                f"UART: {co2_uart_ppm} ppm"
+                                f"  ⚠ Δ{sign}{int(diff)}"
+                            ),
+                            text_color="#ff8800"
+                        )
+                        log_txt(
+                            f"CO2 UART DISCREPANCY: "
+                            f"PWM={co2_ppm} "
+                            f"UART={co2_uart_ppm} "
+                            f"DELTA={diff:+.1f}"
+                        )
+                    else:
+                        label_co2_uart.configure(
+                            text=f"UART: {co2_uart_ppm} ppm ✓",
+                            text_color="#00cc44"
+                        )
+
+                except Exception as e:
+                    log_txt(f"UART CO2 parse error: {e}")
+                    label_co2_uart.configure(
+                        text="UART: parse error",
+                        text_color="gray"
+                    )
+            else:
+                label_co2_uart.configure(
+                    text="UART: N/A",
+                    text_color="gray"
+                )
+
+# ====================================================
+# PERIODIC UART AVAILABILITY + ABC STATE REFRESH
+# ====================================================
+#
+# Every ABC_REFRESH_EVERY cycles (~60 seconds):
+#   1. Re-check if UART signal is present on V13
+#   2. If available: refresh ABC button state from V21
+#   3. If unavailable: keep / set buttons disabled
+#
+# This means buttons automatically light up the first
+# time UART wires are connected, without restarting.
+#
+# ====================================================
+
+        global abc_refresh_counter
+        abc_refresh_counter += 1
+
+        if abc_refresh_counter >= ABC_REFRESH_EVERY:
+            abc_refresh_counter = 0
+            check_uart_availability()
 
         if msg is not None:
             label_msg.configure(text=msg)
@@ -1235,6 +1778,9 @@ try:
 
 except Exception as e:
     log_txt(f"Startup connection test failed: {e}")
+
+log_txt("Querying initial ABC state...")
+check_uart_availability()
 
 # ============================================================
 # START LOOP

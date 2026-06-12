@@ -557,13 +557,13 @@ Diagnostic logging includes:
 Dashboard (Windows EXE file):
 
 ```text
-v1.8
+v1.9
 ```
 
 Firmware (Arduino IDE):
 
 ```text
-v. 5/28/2026 by AM
+v. 6/12/2026 by AM
 ```
 
 ---

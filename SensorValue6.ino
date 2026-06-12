@@ -25,7 +25,8 @@
  *
  * Blynk library installed in Arduio must be 0.6.1
  *
- * v. 5/29/2026 by AM
+ * v. 5/29/2026 by AM  (v7 original)
+ * v. 6/12/2026 by AM  (v8 — UART cross-check, zero-cal, ABC control)
  *
  * ============================================================
  * ORIGINAL BUG FIXES
@@ -343,6 +344,87 @@
  * RATE	  Rate-reject consecutive counter
  *
  * ============================================================
+ * [NEW v8] UART CROSS-CHECK AND CALIBRATION CONTROL
+ * ============================================================
+ *
+ * The MH-Z19 sensor simultaneously outputs both PWM and UART
+ * from its onboard processor. No existing wires need to be
+ * changed. Add only two new wires:
+ *
+ *   MH-Z19 TX  →  ESP8266 GPIO13 (D7)   [SW_UART_RX]
+ *   MH-Z19 RX  →  ESP8266 GPIO15 (D8)   [SW_UART_TX]
+ *
+ * To use different pins later, change only two #defines:
+ *
+ *   #define SW_UART_RX  13
+ *   #define SW_UART_TX  15
+ *
+ * While the two wires are NOT connected readCO2UART() always
+ * returns -1 (150 ms response timeout) and V13 is never
+ * written to Blynk. The Python dashboard reads None for V13
+ * and keeps both calibration buttons gray/disabled with no
+ * code change needed on the dashboard side.
+ *
+ * NOTE: SoftwareSerial on ESP8266 is interrupt-driven.
+ * Heavy WiFi activity can corrupt individual UART bytes.
+ * PWM remains the primary measurement path. UART is used
+ * only as a cross-check and for calibration commands.
+ *
+ * GPIO15 has a 10k pull-down to GND on the ESP8266 board.
+ * This holds it LOW during boot (required boot mode) and
+ * does not interfere with SoftwareSerial TX after boot.
+ *
+ * ============================================================
+ * [NEW v8] VIRTUAL PINS — COMPLETE MAP
+ * ============================================================
+ *
+ *   V3   = engineering message        (write each cycle)
+ *   V10  = temperature                (write each cycle)
+ *   V11  = humidity                   (write each cycle)
+ *   V12  = CO2 ppm  PWM smoothed      (write each cycle)
+ *
+ *   V13  = CO2 ppm  UART raw          [NEW v8]
+ *            Written ONLY when readCO2UART() succeeds.
+ *            If wires not connected → never written →
+ *            dashboard reads None → buttons stay disabled.
+ *
+ *   V20  = zero calibration trigger   [NEW v8]
+ *            BLYNK_WRITE handler.
+ *            Dashboard writes 1 after user confirms dialog.
+ *            Sends zero-cal UART command to sensor.
+ *            ONLY trigger when sensor has been in fresh
+ *            outdoor air (~400 ppm) for at least 20 min.
+ *            Calibrating indoors corrupts the baseline.
+ *
+ *   V21  = ABC state                  [NEW v8]
+ *            Written each cycle: 1=enabled, 0=disabled.
+ *            BLYNK_WRITE handler: write 1 to enable,
+ *            0 to disable ABC.
+ *            Allows toggling ABC remotely via dashboard.
+ *
+ * ============================================================
+ * [NEW v8] ADDITIONAL DIAGNOSTIC STATE
+ * ============================================================
+ *
+ *   [UART_CAL]
+ *      Zero calibration UART command was just sent.
+ *      Transient — clears on the next valid PWM reading.
+ *
+ * ============================================================
+ * [NEW v8] ADDITIONAL SERIAL DIAGNOSTIC FIELDS
+ * ============================================================
+ *
+ * Two new fields appended after the existing v7 RATE field:
+ *
+ * Field    Shows
+ * -------------------------------------------------------
+ * UART     Last UART CO2 reading in ppm.
+ *          -1 = wires not connected or read failed.
+ *          Also prints delta vs current smoothPPM.
+ * UABC     ABC enable state as tracked by firmware:
+ *          ON (factory default) or OFF.
+ *
+ * ============================================================
  * Strong recommendation if not already present:
  * ============================================================
  *
@@ -360,6 +442,7 @@
 #include <DHT.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
+#include <SoftwareSerial.h>     // [NEW v8] MH-Z19 UART cross-check and calibration
 
 /* ============================================================
  * PINS
@@ -372,6 +455,29 @@
 #define ledPinG  2              // GREEN LED
 #define ledPinO  4              // ORANGE LED
 #define ledPinR  5              // RED LED
+
+/* ============================================================
+ * [NEW v8] UART PINS FOR MH-Z19 SOFT SERIAL
+ * ============================================================
+ *
+ * Change only the two #defines below to use different GPIOs.
+ * No other code needs to change.
+ *
+ * New wires to add (PWM wire on GPIO14 is unchanged):
+ *
+ *   MH-Z19 TX  →  GPIO13 (D7)  — receives data from sensor
+ *   MH-Z19 RX  →  GPIO15 (D8)  — sends commands to sensor
+ *
+ * GPIO15 has a 10k pull-down on the board. It stays LOW
+ * during boot (required) and is safe as TX after boot.
+ *
+ * ============================================================ */
+
+#define SW_UART_RX  13          // GPIO13 / D7  ← MH-Z19 TX
+#define SW_UART_TX  15          // GPIO15 / D8  → MH-Z19 RX
+
+/* [NEW v8] SoftwareSerial object for MH-Z19 UART */
+SoftwareSerial uartSerial(SW_UART_RX, SW_UART_TX);
 
 /* ============================================================
  * CREDENTIALS (in secret.h file)
@@ -442,6 +548,41 @@ bool abcRecoveryMode = false;
 unsigned long abcRecoveryStart = 0;
 
 int stableRecoveryCounter = 0;
+
+/* ============================================================
+ * [NEW v8] ABC STATE TRACKING
+ * ============================================================
+ *
+ * MH-Z19 ships from the factory with ABC enabled (true).
+ *
+ * Updated by BLYNK_WRITE(V21) when the dashboard toggles it.
+ * Written to V21 every sendUptime() cycle so the dashboard
+ * button always shows the correct state after any restart.
+ *
+ * There is no UART command to READ the current ABC state
+ * from the sensor. The firmware tracks it as a software
+ * variable initialised to the factory default. After a
+ * power cycle the variable resets to true. If ABC was
+ * disabled before a restart, BLYNK_WRITE(V21) must be
+ * triggered again to re-disable it.
+ *
+ * ============================================================ */
+
+bool abcEnabled = true;         // [NEW v8] true = ABC on (MH-Z19 factory default)
+
+/* ============================================================
+ * [NEW v8] LAST UART READING — DIAGNOSTIC VARIABLE
+ * ============================================================
+ *
+ * Holds the return value of the most recent readCO2UART()
+ * call. Printed in the serial diagnostic block as UART.
+ *
+ *   >= 0  valid ppm reading via UART
+ *   -1    wires not connected, or read failed this cycle
+ *
+ * ============================================================ */
+
+long lastUartPPM = -1;          // [NEW v8] initialised to -1 (not yet read)
 
 /* ============================================================
  * DIAGNOSTIC STATE
@@ -762,8 +903,262 @@ long readCO2PWM()
 }
 
 /* ============================================================
- * DAILY MINIMUM TRACKER
+ * [NEW v8] READ CO2 VIA UART
+ * ============================================================
+ *
+ * Sends the standard MH-Z19 read-CO2 command over
+ * SoftwareSerial and parses the 9-byte response.
+ *
+ * Purpose: cross-check against the PWM reading. If the two
+ * values differ by more than the dashboard threshold (default
+ * 50 ppm), the Python dashboard shows a warning with the
+ * signed delta value next to the CO2 reading.
+ *
+ * Command — 9 bytes, fixed checksum 0x79:
+ *   0xFF 0x01 0x86 0x00 0x00 0x00 0x00 0x00 0x79
+ *
+ * Response format (9 bytes):
+ *   byte[0] = 0xFF        start byte
+ *   byte[1] = 0x86        command echo
+ *   byte[2] = CO2 high byte
+ *   byte[3] = CO2 low byte
+ *   byte[4..7] = 0x00     reserved
+ *   byte[8]    = checksum
+ *
+ *   CO2 ppm = (byte[2] << 8) | byte[3]
+ *
+ * Checksum = ~(byte[1] + ... + byte[7]) + 1
+ *   (two's complement of the sum of bytes 1–7)
+ *
+ * Returns ppm >= 0 on success.
+ * Returns -1 on timeout, bad header, or checksum mismatch.
+ *
+ * KEY BEHAVIOUR WHEN WIRES ARE NOT CONNECTED:
+ *   uartSerial.available() never reaches 9 within 150 ms
+ *   → returns -1 every cycle → V13 is never written to Blynk
+ *   → dashboard reads None → buttons stay gray and disabled.
+ *
  * ============================================================ */
+
+long readCO2UART()
+{
+  /* MH-Z19 read CO2 command */
+  byte cmd[9] = {
+    0xFF, 0x01, 0x86,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x79
+  };
+
+  /* Flush any stale bytes from receive buffer before sending */
+  while (uartSerial.available())
+    uartSerial.read();
+
+  /* Send command */
+  uartSerial.write(cmd, 9);
+
+  /* Wait up to 150 ms for a full 9-byte response.
+   * Typical MH-Z19 response time is < 30 ms.
+   * 150 ms is tolerant of SoftwareSerial interrupt jitter. */
+  unsigned long waitStart = millis();
+
+  while (uartSerial.available() < 9)
+  {
+    if ((millis() - waitStart) > 150)
+    {
+      /* Timeout — wires absent or sensor not responding */
+      return -1;
+    }
+    delay(2);
+  }
+
+  /* Read 9 response bytes */
+  byte resp[9];
+  for (int i = 0; i < 9; i++)
+    resp[i] = uartSerial.read();
+
+  /* Validate start byte and command echo */
+  if (resp[0] != 0xFF || resp[1] != 0x86)
+  {
+    Serial.print("[CO2 UART] bad header: 0x");
+    Serial.print(resp[0], HEX);
+    Serial.print(" 0x");
+    Serial.println(resp[1], HEX);
+    return -1;
+  }
+
+  /* Verify checksum: ~(sum of bytes 1..7) + 1 */
+  byte csum = 0;
+  for (int i = 1; i <= 7; i++)
+    csum += resp[i];
+  csum = ~csum + 1;
+
+  if (csum != resp[8])
+  {
+    Serial.print("[CO2 UART] checksum error: calc=0x");
+    Serial.print(csum, HEX);
+    Serial.print(" recv=0x");
+    Serial.println(resp[8], HEX);
+    return -1;
+  }
+
+  long ppm = (long)resp[2] * 256 + (long)resp[3];
+
+  if (ppm < 0 || ppm > 5500)
+  {
+    Serial.print("[CO2 UART] ppm out of range: ");
+    Serial.println(ppm);
+    return -1;
+  }
+
+  Serial.print("[CO2 UART] PPM=");
+  Serial.println(ppm);
+
+  return ppm;
+}
+
+/* ============================================================
+ * [NEW v8] SEND ZERO CALIBRATION COMMAND VIA UART
+ * ============================================================
+ *
+ * Sends the MH-Z19 zero-point calibration command.
+ * Called from BLYNK_WRITE(V20) after the user confirms the
+ * calibration dialog on the Python dashboard.
+ *
+ * The Python dashboard enforces a confirmation dialog that
+ * warns the user to place the sensor in fresh outdoor air
+ * (~400 ppm) for at least 20 minutes before confirming.
+ * Calibrating indoors permanently corrupts the baseline.
+ *
+ * The sensor does NOT send a response to this command.
+ *
+ * Command bytes — fixed checksum 0x78:
+ *   0xFF 0x01 0x87 0x00 0x00 0x00 0x00 0x00 0x78
+ *
+ * Checksum: sum = 0x01+0x87 = 0x88
+ *           ~0x88 + 1 = 0x77 + 1 = 0x78  ✓
+ *
+ * ============================================================ */
+
+void sendZeroCalUART()
+{
+  byte cmd[9] = {
+    0xFF, 0x01, 0x87,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x78
+  };
+
+  uartSerial.write(cmd, 9);
+
+  /* Set transient diagnostic state.
+   * Clears on the next valid PWM reading cycle. */
+  diagState = "UART_CAL";
+
+  Serial.println("[CAL] Zero calibration command sent via UART");
+}
+
+/* ============================================================
+ * [NEW v8] SET ABC STATE VIA UART
+ * ============================================================
+ *
+ * Enables or disables Automatic Baseline Calibration.
+ * Called from BLYNK_WRITE(V21) when the dashboard user
+ * clicks the ABC button.
+ *
+ * abcEnabled is updated inside this function so V21 already
+ * reflects the new state on the very next sendUptime() write.
+ *
+ * The sensor does NOT send a response to these commands.
+ *
+ * ABC ON  command — checksum 0xE6:
+ *   0xFF 0x01 0x79 0xA0 0x00 0x00 0x00 0x00 0xE6
+ *   sum = 0x01+0x79+0xA0 = 0x11A → low byte 0x1A
+ *   ~0x1A + 1 = 0xE5 + 1 = 0xE6  ✓
+ *
+ * ABC OFF command — checksum 0x86:
+ *   0xFF 0x01 0x79 0x00 0x00 0x00 0x00 0x00 0x86
+ *   sum = 0x01+0x79 = 0x7A
+ *   ~0x7A + 1 = 0x85 + 1 = 0x86  ✓
+ *
+ * ============================================================ */
+
+void setABC(bool enable)
+{
+  if (enable)
+  {
+    byte on[9] = {
+      0xFF, 0x01, 0x79,
+      0xA0, 0x00, 0x00, 0x00, 0x00,
+      0xE6
+    };
+    uartSerial.write(on, 9);
+  }
+  else
+  {
+    byte off[9] = {
+      0xFF, 0x01, 0x79,
+      0x00, 0x00, 0x00, 0x00, 0x00,
+      0x86
+    };
+    uartSerial.write(off, 9);
+  }
+
+  abcEnabled = enable;
+
+  Serial.print("[ABC] set to: ");
+  Serial.println(enable ? "ENABLED" : "DISABLED");
+}
+
+/* ============================================================
+ * [NEW v8] BLYNK_WRITE(V20) — ZERO CALIBRATION TRIGGER
+ * ============================================================
+ *
+ * Invoked when the dashboard user confirms the zero
+ * calibration dialog. Only acts on value == 1; any other
+ * value (including Blynk sync-on-connect) is ignored.
+ *
+ * ============================================================ */
+
+BLYNK_WRITE(V20)
+{
+  int val = param.asInt();
+
+  if (val == 1)
+  {
+    Serial.println("[BLYNK] V20: zero calibration requested by dashboard");
+    sendZeroCalUART();
+  }
+}
+
+/* ============================================================
+ * [NEW v8] BLYNK_WRITE(V21) — ABC ENABLE / DISABLE
+ * ============================================================
+ *
+ * Invoked when the dashboard user clicks the ABC button.
+ *
+ *   value 1  →  enable  ABC
+ *   value 0  →  disable ABC
+ *
+ * V21 is also written every sendUptime() cycle with the
+ * current abcEnabled value so the dashboard button stays
+ * correct after any device restart or Blynk reconnect.
+ *
+ * ============================================================ */
+
+BLYNK_WRITE(V21)
+{
+  int val = param.asInt();
+
+  if (val == 1)
+  {
+    Serial.println("[BLYNK] V21: ABC enable requested by dashboard");
+    setABC(true);
+  }
+  else if (val == 0)
+  {
+    Serial.println("[BLYNK] V21: ABC disable requested by dashboard");
+    setABC(false);
+  }
+}
 
 void updateDailyMinimum(float ppm)
 {
@@ -1529,6 +1924,41 @@ void sendUptime()
   Blynk.virtualWrite(11, smoothHum);
   Blynk.virtualWrite(12, smoothPPM);
 
+  /* --------------------------------------------------------
+   * [NEW v8] UART CO2 READ — cross-check against PWM value.
+   *
+   * Called here, after the full PWM acquisition pipeline,
+   * so the two reads cannot interfere with each other.
+   *
+   * V13 is written ONLY when readCO2UART() returns a valid
+   * value. If the UART wires are not connected the function
+   * times out and returns -1 every cycle, V13 is never
+   * written, and the dashboard detects UART absent via None.
+   *
+   * lastUartPPM is stored globally for the serial diagnostic
+   * block below.
+   *
+   * V21 is written every cycle with the current abcEnabled
+   * state so the dashboard ABC button stays in sync after
+   * any restart or Blynk reconnect.
+   * -------------------------------------------------------- */
+
+  lastUartPPM = readCO2UART();
+
+  if (lastUartPPM >= 0)
+  {
+    Blynk.virtualWrite(13, lastUartPPM);
+
+    Serial.print("[UART vs PWM] UART=");
+    Serial.print(lastUartPPM);
+    Serial.print("  PWM=");
+    Serial.print((long)smoothPPM);
+    Serial.print("  DELTA=");
+    Serial.println(lastUartPPM - (long)smoothPPM);
+  }
+
+  Blynk.virtualWrite(21, abcEnabled ? 1 : 0);
+
   if (counterLoos > 5)
   {
     Blynk.virtualWrite(
@@ -1625,6 +2055,24 @@ void sendUptime()
   Serial.print("RATE : ");           // rate-reject consecutive counter
   Serial.println(rateRejectCounter);
 
+  /* [NEW v8] UART cross-check and ABC state */
+
+  Serial.print("UART : ");           // last UART CO2 reading in ppm
+  if (lastUartPPM >= 0)
+  {
+    Serial.print(lastUartPPM);
+    Serial.print(" ppm  (delta vs PWM: ");
+    Serial.print(lastUartPPM - (long)smoothPPM);
+    Serial.println(")");
+  }
+  else
+  {
+    Serial.println("-1  (not wired or read failed this cycle)");
+  }
+
+  Serial.print("UABC : ");           // ABC enable state
+  Serial.println(abcEnabled ? "ON" : "OFF");
+
   Serial.println("===================================");
 
   if (counterLoos < 10)
@@ -1655,6 +2103,19 @@ void setup()
 
   Serial.println();
   Serial.println("===== BOOT START =====");
+
+  /* [NEW v8] Initialise SoftwareSerial for MH-Z19 UART.
+   * Must be called before the first sendUptime() runs.
+   * 9600 baud is the fixed MH-Z19 UART baud rate.
+   * If the UART wires are not yet connected this call is
+   * harmless — readCO2UART() will simply time out every
+   * cycle until the wires are added. */
+  uartSerial.begin(9600);
+
+  Serial.print("[UART] SoftSerial started — RX=GPIO");
+  Serial.print(SW_UART_RX);
+  Serial.print("  TX=GPIO");
+  Serial.println(SW_UART_TX);
 
   pinMode(pwmPin, INPUT);
 
