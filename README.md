@@ -69,10 +69,10 @@ The MH-Z19 simultaneously outputs both PWM and UART from its onboard processor.
 No existing wires need to be changed. Two additional wires enable UART cross-check
 and remote calibration control:
 
-| MH-Z19 Pin | ESP8266 Pin   | Direction              | Purpose                  |
-| ---------- | ------------- | ---------------------- | ------------------------ |
-| TX         | GPIO13 (D7)   | MH-Z19 → ESP8266       | UART data to firmware    |
-| RX         | GPIO15 (D8)   | ESP8266 → MH-Z19       | Commands to sensor       |
+| MH-Z19 Pin | ESP8266 Pin   | Direction                | Purpose                  |
+| ---------- | ------------- | ------------------------ | ------------------------ |
+| TX         | GPIO0  (D3)   | MH-Z19 → ESP8266 → Blynk | UART data to firmware    |
+| RX         | GPIO15 (D8)   | ESP8266 → MH-Z19         | Commands to sensor       |
 
 > **Note:** GPIO15 has a 10k pull-down on the NodeMCU board. This is correct —
 > it holds the pin LOW during boot (required boot mode) and does not interfere
@@ -773,7 +773,7 @@ v1.9
 Firmware (Arduino IDE):
 
 ```text
-v8 — 6/12/2026 by AM
+6/12/2026 by AM
 ```
 
 ---

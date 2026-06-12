@@ -344,19 +344,19 @@
  * RATE	  Rate-reject consecutive counter
  *
  * ============================================================
- * [NEW v8] UART CROSS-CHECK AND CALIBRATION CONTROL
+ * [NEW v6.8] UART CROSS-CHECK AND CALIBRATION CONTROL
  * ============================================================
  *
  * The MH-Z19 sensor simultaneously outputs both PWM and UART
  * from its onboard processor. No existing wires need to be
  * changed. Add only two new wires:
  *
- *   MH-Z19 TX  →  ESP8266 GPIO13 (D7)   [SW_UART_RX]
+ *   MH-Z19 TX  →  ESP8266 GPIO0  (D3)   [SW_UART_RX]
  *   MH-Z19 RX  →  ESP8266 GPIO15 (D8)   [SW_UART_TX]
  *
  * To use different pins later, change only two #defines:
  *
- *   #define SW_UART_RX  13
+ *   #define SW_UART_RX  0
  *   #define SW_UART_TX  15
  *
  * While the two wires are NOT connected readCO2UART() always
@@ -375,7 +375,7 @@
  * does not interfere with SoftwareSerial TX after boot.
  *
  * ============================================================
- * [NEW v8] VIRTUAL PINS — COMPLETE MAP
+ * [NEW v6.8] VIRTUAL PINS — COMPLETE MAP
  * ============================================================
  *
  *   V3   = engineering message        (write each cycle)
@@ -383,12 +383,12 @@
  *   V11  = humidity                   (write each cycle)
  *   V12  = CO2 ppm  PWM smoothed      (write each cycle)
  *
- *   V13  = CO2 ppm  UART raw          [NEW v8]
+ *   V13  = CO2 ppm  UART raw          [NEW v6.8]
  *            Written ONLY when readCO2UART() succeeds.
  *            If wires not connected → never written →
  *            dashboard reads None → buttons stay disabled.
  *
- *   V20  = zero calibration trigger   [NEW v8]
+ *   V20  = zero calibration trigger   [NEW v6.8]
  *            BLYNK_WRITE handler.
  *            Dashboard writes 1 after user confirms dialog.
  *            Sends zero-cal UART command to sensor.
@@ -396,14 +396,14 @@
  *            outdoor air (~400 ppm) for at least 20 min.
  *            Calibrating indoors corrupts the baseline.
  *
- *   V21  = ABC state                  [NEW v8]
+ *   V21  = ABC state                  [NEW v6.8]
  *            Written each cycle: 1=enabled, 0=disabled.
  *            BLYNK_WRITE handler: write 1 to enable,
  *            0 to disable ABC.
  *            Allows toggling ABC remotely via dashboard.
  *
  * ============================================================
- * [NEW v8] ADDITIONAL DIAGNOSTIC STATE
+ * [NEW v6.8] ADDITIONAL DIAGNOSTIC STATE
  * ============================================================
  *
  *   [UART_CAL]
@@ -411,7 +411,7 @@
  *      Transient — clears on the next valid PWM reading.
  *
  * ============================================================
- * [NEW v8] ADDITIONAL SERIAL DIAGNOSTIC FIELDS
+ * [NEW v6.8] ADDITIONAL SERIAL DIAGNOSTIC FIELDS
  * ============================================================
  *
  * Two new fields appended after the existing v7 RATE field:
@@ -442,7 +442,7 @@
 #include <DHT.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
-#include <SoftwareSerial.h>     // [NEW v8] MH-Z19 UART cross-check and calibration
+#include <SoftwareSerial.h>     // [NEW v6.8] MH-Z19 UART cross-check and calibration
 
 /* ============================================================
  * PINS
@@ -457,7 +457,7 @@
 #define ledPinR  5              // RED LED
 
 /* ============================================================
- * [NEW v8] UART PINS FOR MH-Z19 SOFT SERIAL
+ * [NEW v6.8] UART PINS FOR MH-Z19 SOFT SERIAL
  * ============================================================
  *
  * Change only the two #defines below to use different GPIOs.
@@ -465,7 +465,7 @@
  *
  * New wires to add (PWM wire on GPIO14 is unchanged):
  *
- *   MH-Z19 TX  →  GPIO13 (D7)  — receives data from sensor
+ *   MH-Z19 TX  →  GPIO13 (D3)  — receives data from sensor
  *   MH-Z19 RX  →  GPIO15 (D8)  — sends commands to sensor
  *
  * GPIO15 has a 10k pull-down on the board. It stays LOW
@@ -473,8 +473,8 @@
  *
  * ============================================================ */
 
-#define SW_UART_RX  13          // GPIO13 / D7  ← MH-Z19 TX
-#define SW_UART_TX  15          // GPIO15 / D8  → MH-Z19 RX
+#define SW_UART_RX  0           // GPIO0  / D3  ← MH-Z19 TX  (pull-up, boot-safe because UART idles HIGH) / Virtual PIN = 13 (UART CO2 reading / MH-Z19 → ESP8266 → Blynk)
+#define SW_UART_TX  15          // GPIO15 / D8  → MH-Z19 RX  (no virtual PIN as this one is used for transmitting commands / ESP8266 → MH-Z19)
 
 /* [NEW v8] SoftwareSerial object for MH-Z19 UART */
 SoftwareSerial uartSerial(SW_UART_RX, SW_UART_TX);
