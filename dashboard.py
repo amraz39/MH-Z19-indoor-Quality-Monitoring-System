@@ -1457,7 +1457,7 @@ def update_dashboard():
             if co2_uart is not None:
                 try:
                     co2_uart_ppm = round(float(co2_uart), 1)
-                    diff         = co2_ppm - co2_uart_ppm
+                    diff         = co2_uart_ppm - co2_ppm
 
                     if abs(diff) >= UART_DIFF_THRESHOLD:
                         sign = "+" if diff > 0 else ""
