@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v1.9
+# v2.0
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -65,6 +65,8 @@
  - Zero calibration trigger button
  - ABC enable/disable button with 3-state colour indicator
  - UART CO2 cross-check vs PWM with delta warning
+ - ABC preference persistence — if user set ABC OFF, dashboard
+   automatically re-enforces OFF if board reboots and resets to ON
 
 ============================================================
  REQUIRED FILES
@@ -157,6 +159,20 @@ UPDATE_INTERVAL_MS = 5000
 
 CSV_LOG_FILE = "co2_log.csv"
 TXT_LOG_FILE = "engineering_log.txt"
+
+# ============================================================
+# ABC PREFERENCE FILE
+# ============================================================
+#
+# Stores the user's last explicit ABC choice on disk so it
+# survives dashboard restarts as well as board reboots.
+#
+# File contains a single line: "enabled" or "disabled".
+# If the file does not exist no preference is enforced.
+#
+# ============================================================
+
+ABC_PREFERENCE_FILE = "abc_preference.txt"
 
 # ============================================================
 # CO2 AIR QUALITY COLOUR THRESHOLDS
@@ -718,8 +734,100 @@ ABC_REFRESH_EVERY   = 12
 
 uart_available = False
 
-
 def _apply_abc_button_style():
+    """
+    Update button_abc colour and label to match abc_state.
+    Safe to call at any time after button_abc is created.
+    """
+
+    global abc_state
+
+    if abc_state == "enabled":
+        button_abc.configure(
+            text="ABC: ON",
+            fg_color="#1a6b2e",
+            hover_color="#2a8b3e"
+        )
+    elif abc_state == "disabled":
+        button_abc.configure(
+            text="ABC: OFF",
+            fg_color="#6b1a1a",
+            hover_color="#8b2a2a"
+        )
+    else:
+        button_abc.configure(
+            text="ABC: ?",
+            fg_color="gray40",
+            hover_color="gray50"
+        )
+
+
+
+# ============================================================
+# ABC USER PREFERENCE
+# ============================================================
+#
+# Tracks what the user explicitly chose last time they clicked
+# the ABC button. Independent of what the board currently
+# reports via V21.
+#
+# Values:
+#   None         — user has never explicitly set it this session
+#                  (no enforcement; board state is accepted)
+#   "enabled"    — user explicitly chose ON
+#   "disabled"   — user explicitly chose OFF
+#
+# Loaded from ABC_PREFERENCE_FILE at startup so the preference
+# survives dashboard restarts.
+#
+# When the board reboots and V21 flips back to 1 (ON), but the
+# stored preference is "disabled", refresh_abc_state() detects
+# the mismatch and automatically writes 0 to V21 to restore OFF.
+#
+# ============================================================
+
+abc_user_preference = None    # populated by load_abc_preference() at startup
+
+
+def load_abc_preference():
+    """
+    Load the last user ABC preference from disk.
+    Returns "enabled", "disabled", or None if file absent/invalid.
+    """
+
+    if not os.path.exists(ABC_PREFERENCE_FILE):
+        return None
+
+    try:
+        with open(ABC_PREFERENCE_FILE, "r", encoding="utf-8") as f:
+            val = f.read().strip()
+
+        if val in ("enabled", "disabled"):
+            log_txt(f"ABC preference loaded from file: {val}")
+            return val
+
+    except Exception as e:
+        log_txt(f"ABC preference load error: {e}")
+
+    return None
+
+
+def save_abc_preference(preference):
+    """
+    Save the user's ABC preference to disk.
+    Called every time the user explicitly clicks the ABC button.
+
+    preference: "enabled" or "disabled"
+    """
+
+    try:
+        with open(ABC_PREFERENCE_FILE, "w", encoding="utf-8") as f:
+            f.write(preference + "\n")
+
+        log_txt(f"ABC preference saved to file: {preference}")
+
+    except Exception as e:
+        log_txt(f"ABC preference save error: {e}")
     """
     Update button_abc colour and label to match abc_state.
     Safe to call at any time after button_abc is created.
@@ -751,9 +859,15 @@ def refresh_abc_state():
     """
     Query V21 from the Blynk server and update abc_state
     and the button colour accordingly.
+
+    If the board reports a state that conflicts with the
+    user's stored preference (e.g. board rebooted and reset
+    ABC back to ON, but user had set it to OFF), this function
+    automatically re-enforces the preference by writing back
+    to V21 and logs the enforcement event.
     """
 
-    global abc_state
+    global abc_state, abc_user_preference
 
     val = read_virtual_pin(V_ABC_STATE)
 
@@ -767,35 +881,97 @@ def refresh_abc_state():
         abc_state = "unknown"
         log_txt(f"ABC state: UNKNOWN (raw={val})")
 
+    # ============================================================
+    # ABC PREFERENCE ENFORCEMENT
+    # ============================================================
+    #
+    # If the board reports a state that contradicts the user's
+    # last explicit choice, the dashboard re-enforces the
+    # preference automatically.
+    #
+    # Typical trigger:
+    #   User set ABC OFF → board rebooted → board reset ABC to ON
+    #   → V21 now reads "1" → mismatch detected → write 0 to V21
+    #
+    # Only enforces when:
+    #   - preference is explicitly set ("enabled" or "disabled")
+    #   - board state is known (not "unknown")
+    #   - board state differs from preference
+    #
+    # ============================================================
+
+    if (
+        abc_user_preference is not None and
+        abc_state != "unknown" and
+        abc_state != abc_user_preference
+    ):
+        enforce_value = 0 if abc_user_preference == "disabled" else 1
+
+        log_txt(
+            f"ABC PREFERENCE MISMATCH: board={abc_state} "
+            f"preference={abc_user_preference} — "
+            f"re-enforcing preference (writing {enforce_value} to V{V_ABC_STATE})"
+        )
+
+        ok = write_virtual_pin(V_ABC_STATE, enforce_value)
+
+        if ok:
+            # Update local state to match what we just enforced
+            abc_state = abc_user_preference
+
+            log_txt(
+                f"ABC preference re-enforced successfully: {abc_user_preference}"
+            )
+
+            # Update the info label so the user sees what happened
+            label_click_info.configure(
+                text=(
+                    f"⚠ ABC re-enforced to {abc_user_preference.upper()} "
+                    f"after board reset"
+                ),
+                text_color="#ffd700"
+            )
+        else:
+            log_txt("ABC preference re-enforcement FAILED — will retry next cycle")
+
     _apply_abc_button_style()
 
 
 def toggle_abc():
     """
-    Toggle ABC state.
+    Toggle ABC state on user button click.
 
     If currently enabled  → write 0 to V21 (disable).
     If currently disabled → write 1 to V21 (enable).
     If unknown            → write 1 to V21 (enable as safe default).
 
+    Saves the new preference to disk so it survives both
+    dashboard restarts and board reboots.
+
     Updates button colour immediately on successful write,
     then re-reads V21 to confirm.
     """
 
-    global abc_state
+    global abc_state, abc_user_preference
 
     if abc_state == "enabled":
-        new_value = 0
-        action    = "DISABLE"
+        new_value  = 0
+        action     = "DISABLE"
+        preference = "disabled"
     else:
-        new_value = 1
-        action    = "ENABLE"
+        new_value  = 1
+        action     = "ENABLE"
+        preference = "enabled"
 
     log_txt(f"ABC toggle: sending {action} (value={new_value})")
 
     ok = write_virtual_pin(V_ABC_STATE, new_value)
 
     if ok:
+        # Save user preference to disk before refreshing state
+        abc_user_preference = preference
+        save_abc_preference(preference)
+
         log_txt(f"ABC toggle: write succeeded, refreshing state")
         refresh_abc_state()
     else:
@@ -1780,6 +1956,7 @@ except Exception as e:
     log_txt(f"Startup connection test failed: {e}")
 
 log_txt("Querying initial ABC state...")
+abc_user_preference = load_abc_preference()
 check_uart_availability()
 
 # ============================================================

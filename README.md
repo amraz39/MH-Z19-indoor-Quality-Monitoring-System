@@ -323,6 +323,7 @@ project_folder/
 │
 ├── dashboard.py
 ├── dashboard.exe
+├── abc_preference.txt
 ├── sensorValue6.ino
 ├── secrets.h
 ├── co2_log.csv
@@ -331,6 +332,7 @@ project_folder/
 ```
 
 > Generated at runtime: `engineering_log.txt`, `blynk_history_*.txt`, `blynk_history_export_*.csv`
+> Needs to exist at runtime:  `abc_preference.txt`
 
 ---
 
