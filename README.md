@@ -36,6 +36,22 @@ Local Blynk Server (Raspberry Pi 5)
 Windows Python Dashboard
 ```
 
+<p align="left">
+  <img src="arduino-board.jpg" alt="ESP-8266 Board with pins used and labeled" width="300"/>
+</p>
+
+<p align="left">
+  <img src="CO2-sensor1.jpg" alt="MH-Z19 CO2 sensor with UART and PWM outputs" width="500"/>
+</p>
+
+<p align="left">
+  <img src="CO2-sensor2.jpg" alt="MH-Z19 CO2 sensor with UART and PWM outputs" width="500"/>
+</p>
+
+<p align="left">
+  <img src="temp-hum-sensor.jpg" alt="DHT22 temperature/humidity sensor with 3-pin header" width="500"/>
+</p>
+
 ---
 
 # Components
