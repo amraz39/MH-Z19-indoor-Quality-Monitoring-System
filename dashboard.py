@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v2.0
+# v2.1
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -17,7 +17,7 @@
 
 # IMPORTANT
 # Update this line in the Python code:
-# BLYNK_SERVER = "192.168.3.9"
+# BLYNK_SERVER = "192.168.xx.xx" #<-- RPi5 (x9) and Rpi5 new (x4)
 # if your Raspberry Pi IP changes.
 
 # Port is automatically set to: 8080
@@ -81,6 +81,7 @@
    #define WIFI_SSID   "yourssid"
    #define WIFI_PASS   "yourpass"
    #define BLYNK_AUTH  "yourtoken"
+   #define BLYNK_SERVER "192.xxx.xx.xx"
 
 ============================================================
  REQUIRED PYTHON PACKAGES
@@ -149,10 +150,34 @@ import matplotlib.ticker as mticker
 import numpy as np
 
 # ============================================================
+# READ IP ADDRESS OF BLYNK SERVER FROM secrets.h
+# ============================================================
+
+def load_IP_server():
+    """
+    Extract BLYNK_SERVER from secrets.h
+    """
+
+    if not os.path.exists("secrets.h"):
+        raise FileNotFoundError("secrets.h not found")
+
+    with open("secrets.h", "r", encoding="utf-8") as f:
+        content = f.read()
+
+    match = re.search(r'BLYNK_SERVER\s+"([^"]+)"', content)
+
+    if not match:
+        raise ValueError("BLYNK_SERVER not found in secrets.h")
+
+    return match.group(1)
+
+BLYNK_SERVER = load_IP_server()
+
+# ============================================================
 # CONFIGURATION
 # ============================================================
 
-BLYNK_SERVER = "192.168.3.9"
+#BLYNK_SERVER = "192.xxx.xx.xx"
 BLYNK_PORT   = 8084
 
 UPDATE_INTERVAL_MS = 5000

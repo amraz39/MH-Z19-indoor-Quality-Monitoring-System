@@ -349,9 +349,10 @@ Example:
 ```cpp
 #pragma once
 
-#define WIFI_SSID   "YourWiFi"
-#define WIFI_PASS   "YourPassword"
-#define BLYNK_AUTH  "YourAuthToken"
+#define WIFI_SSID    "YourWiFi"
+#define WIFI_PASS    "YourPassword"
+#define BLYNK_AUTH   "YourAuthToken"
+#define BLYNK_SERVER "xxx.xxx.xxx.xxx"
 ```
 
 ---
@@ -785,7 +786,7 @@ The firmware prints a diagnostic block every 5 seconds over USB serial (115200 b
 Dashboard (Windows EXE file):
 
 ```text
-v1.9
+v2.1
 ```
 
 Firmware (Arduino IDE):

@@ -25,8 +25,96 @@
  *
  * Blynk library installed in Arduio must be 0.6.1
  *
- * v. 5/29/2026 by AM  (v7 original)
- * v. 6/12/2026 by AM  (v8 — UART cross-check, zero-cal, ABC control)
+ * v. 5/29/2026 by AM  (v6.7 original)
+ * v. 6/12/2026 by AM  (v6.8 — UART cross-check, zero-cal, ABC control)
+ * v. 6/14/2026 by AM  (v6.9 — logic audit and bug fixes, see list below)
+ * v. 6/21/2026 by AM  (v6.10 — move IP address of the Blynk server into secrets.h)
+ *
+ * ============================================================
+ * v6.9 BUG FIXES AND IMPROVEMENTS
+ * ============================================================
+ *
+ * FIX 1 — SENSOR_STUCK and FAULT_LATCHED state interference
+ *
+ *   When sensorStuck fired it forced rawPPM = -1, which then
+ *   incremented consecutiveFaults until FAULT_LATCH_COUNT was
+ *   reached and faultLatched overwrote diagState with
+ *   "FAULT_LATCHED", silently erasing "SENSOR_STUCK".
+ *
+ *   The two failure modes are now tracked independently via a
+ *   dedicated sensorStuckLatched flag. The fault latch path
+ *   is skipped when the failure reason is a stuck sensor.
+ *   diagState priority: SENSOR_STUCK > FAULT_LATCHED > others.
+ *
+ * ------------------------------------------------------------
+ *
+ * FIX 2 — Watchdog not updated during controlled recovery
+ *
+ *   lastValidReadingTime was only updated when
+ *   !controlledRecoveryActive was true. This meant a
+ *   controlled recovery lasting > 5 min would trigger a
+ *   watchdog restart even though the system was functioning.
+ *
+ *   lastValidReadingTime is now updated on every accepted
+ *   measurement path, including controlled recovery.
+ *
+ * ------------------------------------------------------------
+ *
+ * FIX 3 — Dead no-op else branch removed
+ *
+ *   The else-if branch after the median consensus block:
+ *
+ *     else if (!validMeasurement) { validMeasurement = false; }
+ *
+ *   was a pure no-op. Removed with a comment explaining that
+ *   validMeasurement is already false in that path.
+ *
+ * ------------------------------------------------------------
+ *
+ * FIX 4 — Identical if/else in invalid-path alpha selection
+ *
+ *   Both branches of the if (faultLatched) / else block in
+ *   the invalid-measurement fallback path assigned 0.05f.
+ *   The if/else is removed; a single assignment with a
+ *   comment covers both cases cleanly.
+ *
+ * ------------------------------------------------------------
+ *
+ * FIX 5 — STUCK_THRESHOLD raised and low-CO2 guard added
+ *
+ *   STUCK_THRESHOLD = 40 (3.3 min) was too aggressive.
+ *   At low CO2 concentrations (fresh air, ~400 ppm) the
+ *   MH-Z19 legitimately outputs the same integer value for
+ *   many cycles because the NDIR noise floor is smaller
+ *   than 1 LSB in that range.
+ *
+ *   Changes:
+ *     - STUCK_THRESHOLD raised from 40 to 72 cycles (6 min)
+ *     - Stuck detection is now suppressed when smoothPPM
+ *       is below STUCK_LOW_CO2_THRESHOLD (500 ppm), where
+ *       integer repetition is physically normal behaviour.
+ *
+ * ------------------------------------------------------------
+ *
+ * FIX 6 — medianConsensusCount not reset on fault latch entry
+ *
+ *   If a fault was latched while medianConsensusCount was
+ *   partially accumulated, the stale count could cause a
+ *   spurious consensus override immediately after latch
+ *   clearance. medianConsensusCount is now reset to zero
+ *   whenever faultLatched becomes true.
+ *
+ * ------------------------------------------------------------
+ *
+ * FIX 7 — Daily restart re-entry guard added
+ *
+ *   If the device rebooted before 02:01 had elapsed, the
+ *   restart window could trigger again on the same night.
+ *   A restartedToday boolean is now set before ESP.restart()
+ *   and cleared at 02:00:00 so only one restart per night
+ *   is allowed. NTP unavailability is unchanged (no restart).
+ *
+ * ============================================================
  *
  * ============================================================
  * ORIGINAL BUG FIXES
@@ -131,7 +219,7 @@
  * LAYER 6 — Daily baseline plausibility validation
  *
  * ============================================================
- * INDUSTRIAL PROTECTION ADDITIONS (v7)
+ * INDUSTRIAL PROTECTION ADDITIONS (v6.7)
  * ============================================================
  *
  * LAYER 7 — Rolling median outlier rejection
@@ -171,6 +259,14 @@
  *   On SENSOR_STUCK the system holds the last stable
  *   smoothed value and reports the fault.
  *
+ *   [v6.9 FIX 5] STUCK_THRESHOLD raised from 40 to 72 cycles
+ *   (~6 min). Detection suppressed below 500 ppm where
+ *   integer repetition is physically normal for this sensor.
+ *
+ *   [v6.9 FIX 1] sensorStuckLatched tracks the stuck state
+ *   independently of faultLatched so neither overwrites the
+ *   other's diagState.
+ *
  * ------------------------------------------------------------
  *
  * LAYER 9 — Fault latching
@@ -187,6 +283,15 @@
  *   During a latched fault the smoother uses a very
  *   conservative alpha (0.05) so that one stray reading
  *   cannot rapidly corrupt the displayed value.
+ *
+ *   [v6.9 FIX 1] consecutiveFaults is NOT incremented when
+ *   the invalid reading originates from a stuck sensor
+ *   (sensorStuckLatched == true). These two failure modes
+ *   are now tracked and reported independently.
+ *
+ *   [v6.9 FIX 6] medianConsensusCount is reset to zero when
+ *   faultLatched becomes true to prevent stale consensus
+ *   from causing a spurious override after latch clearance.
  *
  * ------------------------------------------------------------
  *
@@ -225,8 +330,15 @@
  *   The watchdog timer resets on every valid reading so
  *   it does not interfere with normal stable operation.
  *
+ *   [v6.9 FIX 2] lastValidReadingTime is now updated on the
+ *   controlled-recovery path as well. Previously it was
+ *   only updated when !controlledRecoveryActive, which
+ *   meant a controlled recovery lasting > 5 min would
+ *   trigger a watchdog restart even though the measurement
+ *   pipeline was alive and functioning.
+ *
  * ============================================================
- * ADAPTIVE SMOOTHING (v7)
+ * ADAPTIVE SMOOTHING (v6.7)
  * ============================================================
  *
  *   Original fixed alpha:
@@ -414,7 +526,7 @@
  * [NEW v6.8] ADDITIONAL SERIAL DIAGNOSTIC FIELDS
  * ============================================================
  *
- * Two new fields appended after the existing v7 RATE field:
+ * Two new fields appended after the existing v6.7 RATE field:
  *
  * Field    Shows
  * -------------------------------------------------------
@@ -473,14 +585,14 @@
  *
  * ============================================================ */
 
-#define SW_UART_RX  0           // GPIO0  / D3  ← MH-Z19 TX  (pull-up, boot-safe because UART idles HIGH) / Virtual PIN = 13 (UART CO2 reading / MH-Z19 → ESP8266 → Blynk)
+#define SW_UART_RX  13          // GPIO0  / D3  ← MH-Z19 TX  (pull-up, boot-safe because UART idles HIGH) / Virtual PIN = 13 (UART CO2 reading / MH-Z19 → ESP8266 → Blynk)
 #define SW_UART_TX  15          // GPIO15 / D8  → MH-Z19 RX  (no virtual PIN as this one is used for transmitting commands / ESP8266 → MH-Z19)
 
-/* [NEW v8] SoftwareSerial object for MH-Z19 UART */
+/* [NEW v6.8] SoftwareSerial object for MH-Z19 UART */
 SoftwareSerial uartSerial(SW_UART_RX, SW_UART_TX);
 
 /* ============================================================
- * CREDENTIALS (in secret.h file)
+ * CREDENTIALS (in secrets.h file)
  * ============================================================ */
 
 #include "secrets.h"
@@ -489,11 +601,11 @@ char auth[] = BLYNK_AUTH;
 char ssid[] = WIFI_SSID;
 char pass[] = WIFI_PASS;
 
-char server[] = "192.168.3.9";
-//char server[] = "192.168.3.45";   // AsusTUF Laptop
+char server[] = BLYNK_SERVER;
+//char server[] = "xxx.xxx.xxx.45";   // AsusTUF Laptop
 
 #define MY_BLYNK_PORT 8084
-//#define MY_BLYNK_PORT 8080        // AsusTUF Laptop
+//#define MY_BLYNK_PORT 8080          // AsusTUF Laptop
 
 /* ============================================================
  * OBJECTS
@@ -550,7 +662,7 @@ unsigned long abcRecoveryStart = 0;
 int stableRecoveryCounter = 0;
 
 /* ============================================================
- * [NEW v8] ABC STATE TRACKING
+ * [NEW v6.8] ABC STATE TRACKING
  * ============================================================
  *
  * MH-Z19 ships from the factory with ABC enabled (true).
@@ -568,10 +680,10 @@ int stableRecoveryCounter = 0;
  *
  * ============================================================ */
 
-bool abcEnabled = true;         // [NEW v8] true = ABC on (MH-Z19 factory default)
+bool abcEnabled = true;         // [NEW v6.8] true = ABC on (MH-Z19 factory default)
 
 /* ============================================================
- * [NEW v8] LAST UART READING — DIAGNOSTIC VARIABLE
+ * [NEW v6.8] LAST UART READING — DIAGNOSTIC VARIABLE
  * ============================================================
  *
  * Holds the return value of the most recent readCO2UART()
@@ -582,7 +694,7 @@ bool abcEnabled = true;         // [NEW v8] true = ABC on (MH-Z19 factory defaul
  *
  * ============================================================ */
 
-long lastUartPPM = -1;          // [NEW v8] initialised to -1 (not yet read)
+long lastUartPPM = -1;          // [NEW v6.8] initialised to -1 (not yet read)
 
 /* ============================================================
  * DIAGNOSTIC STATE
@@ -591,6 +703,17 @@ long lastUartPPM = -1;          // [NEW v8] initialised to -1 (not yet read)
 String diagState = "BOOT";
 
 bool hadRecentInvalidMeasurement = false;
+
+/* [v6.9 FIX 7] Daily-restart re-entry guard.
+ *
+ * The restart window is 02:01:02–02:01:17 (checked every 5 s).
+ * If the device reboots and comes back up before the window closes,
+ * it would restart again on the same night. restartedToday prevents
+ * that. It is set to true immediately before ESP.restart() is called
+ * and cleared back to false at 02:00:00 so the window is re-armed
+ * for the following night.
+ */
+bool restartedToday = false;
 
 /*
  * RATE RECOVERY COUNTER
@@ -631,7 +754,7 @@ String userMsg;
 int counterLoos = 0;
 
 /* ============================================================
- * [NEW v7] LAYER 7 — ROLLING MEDIAN OUTLIER REJECTION
+ * [NEW v6.7] LAYER 7 — ROLLING MEDIAN OUTLIER REJECTION
  *
  * A circular buffer of MEDIAN_WINDOW raw samples.
  * The median of the buffer is recomputed every cycle
@@ -662,7 +785,7 @@ int  medianConsensusCount = 0;      // consecutive cycles where raw agrees with 
 long lastComputedMedian = -1;       // median value from last cycle (for diagnostics)
 
 /* ============================================================
- * [NEW v7] LAYER 8 — STUCK SENSOR DETECTION
+ * [NEW v6.7] LAYER 8 — STUCK SENSOR DETECTION
  *
  * The MH-Z19 always shows small natural variation in its
  * raw output even in a perfectly stable environment
@@ -680,14 +803,40 @@ long lastComputedMedian = -1;       // median value from last cycle (for diagnos
  * restart the device if the stuck condition persists.
  * ============================================================ */
 
-#define STUCK_THRESHOLD 40          // cycles of identical reading → stuck
+/* [v6.9 FIX 5] STUCK_THRESHOLD raised from 40 to 72 (6 min at 5s interval).
+ *
+ * Rationale:
+ *   At low CO2 concentrations (~400 ppm, fresh outdoor air) the MH-Z19
+ *   routinely outputs the same integer value for many consecutive cycles
+ *   because its NDIR noise floor is smaller than 1 LSB at that end of
+ *   the range. The original 40-cycle threshold (3.3 min) caused false
+ *   SENSOR_STUCK alarms during normal stable-air operation at startup.
+ *
+ *   72 cycles (~6 min) is still fast enough to catch a genuine hardware
+ *   freeze (PWM signal loss, sensor power fault) well within a reasonable
+ *   detection window, while avoiding false positives in stable air.
+ *
+ * STUCK_LOW_CO2_THRESHOLD:
+ *   Stuck detection is additionally suppressed when the smoothed CO2 level
+ *   is below this value (500 ppm). Integer repetition in fresh air is
+ *   physically normal behaviour for this sensor and must not be flagged
+ *   as a fault. Detection resumes once the level rises above the threshold.
+ */
+#define STUCK_THRESHOLD          72   // cycles of identical reading → stuck (6 min)
+#define STUCK_LOW_CO2_THRESHOLD 500   // ppm below which stuck detection is suppressed
 
 long  prevRawForStuck  = -1;        // raw reading in the previous cycle
 int   stuckCounter     = 0;         // consecutive identical reading counter
 bool  sensorStuck      = false;     // true once STUCK_THRESHOLD reached
 
+/* [v6.9 FIX 1] Separate latched flag for the stuck condition so that
+ * sensorStuck and faultLatched are tracked independently and do not
+ * overwrite each other's diagState. See FIX 1 comment in the header.
+ */
+bool  sensorStuckLatched = false;   // latched once sensorStuck is confirmed
+
 /* ============================================================
- * [NEW v7] LAYER 9 — FAULT LATCHING
+ * [NEW v6.7] LAYER 9 — FAULT LATCHING
  *
  * Prevents rapid OK/FAULT state oscillation during
  * intermittent sensor or WiFi noise bursts.
@@ -715,7 +864,7 @@ int  totalFaultCount        = 0;    // lifetime bad-reading counter
 int  totalMedianRejectCount = 0;    // lifetime median-rejected-spike counter
 
 /* ============================================================
- * [NEW v7] LAYER 10 — ADAPTIVE PLAUSIBILITY THRESHOLDS
+ * [NEW v6.7] LAYER 10 — ADAPTIVE PLAUSIBILITY THRESHOLDS
  *
  * adaptiveRateLimit and adaptiveAlpha are populated each
  * cycle by getAdaptiveRateLimit() and getAdaptiveAlpha()
@@ -726,7 +875,7 @@ float adaptiveRateLimit = 500.0f;   // current cycle rate-of-change limit (ppm)
 float adaptiveAlpha     = 0.30f;    // current cycle smoothing alpha
 
 /* ============================================================
- * [NEW v7] LAYER 11 — SOFTWARE WATCHDOG RESTART
+ * [NEW v6.7] LAYER 11 — SOFTWARE WATCHDOG RESTART
  *
  * lastValidReadingTime is updated on every accepted
  * measurement. If it has not been updated for
@@ -903,7 +1052,7 @@ long readCO2PWM()
 }
 
 /* ============================================================
- * [NEW v8] READ CO2 VIA UART
+ * [NEW v6.8] READ CO2 VIA UART
  * ============================================================
  *
  * Sends the standard MH-Z19 read-CO2 command over
@@ -1017,7 +1166,7 @@ long readCO2UART()
 }
 
 /* ============================================================
- * [NEW v8] SEND ZERO CALIBRATION COMMAND VIA UART
+ * [NEW v6.8] SEND ZERO CALIBRATION COMMAND VIA UART
  * ============================================================
  *
  * Sends the MH-Z19 zero-point calibration command.
@@ -1057,7 +1206,7 @@ void sendZeroCalUART()
 }
 
 /* ============================================================
- * [NEW v8] SET ABC STATE VIA UART
+ * [NEW v6.8] SET ABC STATE VIA UART
  * ============================================================
  *
  * Enables or disables Automatic Baseline Calibration.
@@ -1109,7 +1258,7 @@ void setABC(bool enable)
 }
 
 /* ============================================================
- * [NEW v8] BLYNK_WRITE(V20) — ZERO CALIBRATION TRIGGER
+ * [NEW v6.8] BLYNK_WRITE(V20) — ZERO CALIBRATION TRIGGER
  * ============================================================
  *
  * Invoked when the dashboard user confirms the zero
@@ -1130,7 +1279,7 @@ BLYNK_WRITE(V20)
 }
 
 /* ============================================================
- * [NEW v8] BLYNK_WRITE(V21) — ABC ENABLE / DISABLE
+ * [NEW v6.8] BLYNK_WRITE(V21) — ABC ENABLE / DISABLE
  * ============================================================
  *
  * Invoked when the dashboard user clicks the ABC button.
@@ -1271,7 +1420,7 @@ void simpLinReg(float* x, float* y, float* lrCoef, int n)
 }
 
 /* ============================================================
- * [NEW v7] ADD SAMPLE TO MEDIAN BUFFER
+ * [NEW v6.7] ADD SAMPLE TO MEDIAN BUFFER
  *
  * Inserts rawPPM into the circular buffer. Once
  * MEDIAN_WINDOW samples have been collected the median
@@ -1302,7 +1451,7 @@ void addToMedianBuffer(long rawPPM)
 }
 
 /* ============================================================
- * [NEW v7] COMPUTE MEDIAN OF BUFFER
+ * [NEW v6.7] COMPUTE MEDIAN OF BUFFER
  *
  * Copies the buffer, sorts it with insertion sort
  * (efficient for small N), and returns the middle value.
@@ -1338,7 +1487,7 @@ long computeMedian()
 }
 
 /* ============================================================
- * [NEW v7] GET ADAPTIVE RATE-OF-CHANGE LIMIT
+ * [NEW v6.7] GET ADAPTIVE RATE-OF-CHANGE LIMIT
  *
  * Returns the maximum allowed ppm change per cycle
  * based on current operating context.
@@ -1373,7 +1522,7 @@ float getAdaptiveRateLimit()
 }
 
 /* ============================================================
- * [NEW v7] GET ADAPTIVE SMOOTHING ALPHA
+ * [NEW v6.7] GET ADAPTIVE SMOOTHING ALPHA
  *
  * Returns the EMA alpha coefficient based on the absolute
  * difference between the current ppm5 and smoothPPM.
@@ -1455,7 +1604,7 @@ void sendUptime()
   long rawPPM = readCO2PWM();
 
   /* --------------------------------------------------------
-   * [NEW v7] LAYER 7 — Add raw reading to median buffer.
+   * [NEW v6.7] LAYER 7 — Add raw reading to median buffer.
    *
    * We add the sample BEFORE the hard clamp and rate checks
    * so the median buffer accumulates raw sensor output.
@@ -1470,22 +1619,37 @@ void sendUptime()
   }
 
   /* --------------------------------------------------------
-   * [NEW v7] LAYER 8 — Stuck sensor detection.
+   * [NEW v6.7] LAYER 8 — Stuck sensor detection.
    *
    * Compare current raw reading to previous raw reading.
    * If identical for STUCK_THRESHOLD cycles, flag stuck.
    * Reset counter if the value changes at all.
    * Only runs on valid readings (rawPPM >= 0).
+   *
+   * [v6.9 FIX 5] Stuck detection is suppressed when smoothPPM
+   * is below STUCK_LOW_CO2_THRESHOLD (500 ppm). At fresh-air
+   * concentrations the MH-Z19 legitimately outputs the same
+   * integer value for many consecutive cycles due to NDIR
+   * noise being smaller than 1 LSB in that range. Detecting
+   * a "stuck" condition there would be a false alarm.
+   *
+   * [v6.9 FIX 1] sensorStuckLatched is a separate flag from
+   * faultLatched so that the two failure modes do not
+   * overwrite each other's diagState. See header FIX 1.
    * -------------------------------------------------------- */
   if (rawPPM >= 0)
   {
-    if (rawPPM == prevRawForStuck)
+    /* [v6.9 FIX 5] Only run stuck detection above the low-CO2 guard */
+    bool stuckDetectionEnabled = (smoothPPM >= STUCK_LOW_CO2_THRESHOLD);
+
+    if (stuckDetectionEnabled && rawPPM == prevRawForStuck)
     {
       stuckCounter++;
 
       if (stuckCounter >= STUCK_THRESHOLD && !sensorStuck)
       {
-        sensorStuck = true;
+        sensorStuck        = true;
+        sensorStuckLatched = true;  // [v6.9 FIX 1] latch independently of faultLatched
 
         diagState = "SENSOR_STUCK";
 
@@ -1498,11 +1662,13 @@ void sendUptime()
     }
     else
     {
-      /* Value changed: sensor is alive, clear stuck flag */
+      /* Value changed (or detection suppressed below threshold):
+       * sensor is alive, clear stuck flag */
       if (sensorStuck)
       {
-        sensorStuck  = false;
-        stuckCounter = 0;
+        sensorStuck        = false;
+        sensorStuckLatched = false;  // [v6.9 FIX 1] clear independent latch
+        stuckCounter       = 0;
 
         Serial.println("[STUCK] sensor recovered");
       }
@@ -1518,6 +1684,13 @@ void sendUptime()
   /* --------------------------------------------------------
    * If sensor is stuck, treat current reading as invalid
    * so the smoother holds its last good value.
+   *
+   * [v6.9 FIX 1] The stuck condition is now kept separate from
+   * the general fault latch path below. consecutiveFaults is
+   * NOT incremented while sensorStuckLatched is true, so that
+   * a stuck sensor cannot inadvertently trigger or sustain
+   * faultLatched and overwrite diagState = "SENSOR_STUCK"
+   * with diagState = "FAULT_LATCHED".
    * -------------------------------------------------------- */
   if (sensorStuck)
   {
@@ -1541,7 +1714,7 @@ void sendUptime()
   bool validMeasurement = (rawPPM >= 0);
 
   /* --------------------------------------------------------
-   * [NEW v7] LAYER 9 — Fault latch counter update.
+   * [NEW v6.7] LAYER 9 — Fault latch counter update.
    *
    * Increment consecutiveFaults on bad readings.
    * Increment consecutiveGood on valid readings.
@@ -1549,6 +1722,15 @@ void sendUptime()
    * FAULT_CLEAR_COUNT good.
    * totalFaultCount is a lifetime counter for long-term
    * diagnostics and never resets after boot.
+   *
+   * [v6.9 FIX 1] When sensorStuckLatched is true the raw
+   * reading has already been set to -1 (invalid) above, but
+   * the cause is a stuck sensor rather than a random fault.
+   * We do NOT increment consecutiveFaults in that case so
+   * that the fault latch cannot fire and overwrite diagState
+   * "SENSOR_STUCK" with "FAULT_LATCHED". The stuck condition
+   * has its own independent recovery path (value changes →
+   * sensorStuck clears → stuck flag cleared above).
    * -------------------------------------------------------- */
   if (validMeasurement)
   {
@@ -1563,7 +1745,7 @@ void sendUptime()
       Serial.println("[FAULT] latch cleared");
     }
   }
-  else
+  else if (!sensorStuckLatched)   // [v6.9 FIX 1] skip fault counter for stuck-sensor invalids
   {
     consecutiveFaults++;
     consecutiveGood = 0;
@@ -1573,6 +1755,13 @@ void sendUptime()
     {
       faultLatched = true;
 
+      /* [v6.9 FIX 6] Reset median consensus count on fault latch entry.
+       * A partially accumulated consensus count at the moment the latch
+       * fires would cause a spurious consensus override immediately after
+       * latch clearance. Resetting here ensures the override can only
+       * trigger after a full MEDIAN_CONSENSUS_COUNT fresh agreements. */
+      medianConsensusCount = 0;
+
       diagState = "FAULT_LATCHED";
 
       Serial.print("[FAULT] latched after ");
@@ -1580,9 +1769,16 @@ void sendUptime()
       Serial.println(" consecutive faults");
     }
   }
+  else
+  {
+    /* sensorStuckLatched is true: reading is invalid due to stuck
+     * sensor. Counters are left unchanged. diagState is already
+     * "SENSOR_STUCK" from the detection block above. */
+    consecutiveGood = 0;  // do not accumulate good-run while stuck
+  }
 
   /* --------------------------------------------------------
-   * [NEW v7] LAYER 10 — Get adaptive rate-of-change limit.
+   * [NEW v6.7] LAYER 10 — Get adaptive rate-of-change limit.
    *
    * Replaces the hardcoded 500 ppm threshold. Stored in
    * adaptiveRateLimit for serial diagnostic output.
@@ -1609,7 +1805,7 @@ void sendUptime()
       Serial.println(rateRejectCounter);
 
       /* ------------------------------------------------------
-       * [NEW v7] MEDIAN CONSENSUS OVERRIDE (part of Layer 7)
+       * [NEW v6.7] MEDIAN CONSENSUS OVERRIDE (part of Layer 7)
        *
        * If the median is ready AND it agrees with the raw
        * reading direction AND MEDIAN_CONSENSUS_COUNT
@@ -1709,13 +1905,11 @@ void sendUptime()
 
         validMeasurement = true;
       }
-      /*
-      * Reject temporary unrealistic jump.
-      */
-      else if (!validMeasurement)
-      {
-        validMeasurement = false;
-      }
+      /* [v6.9 FIX 3] The original code had a no-op else-if here:
+       *   else if (!validMeasurement) { validMeasurement = false; }
+       * validMeasurement is already false at this point on all paths
+       * that reach here (median not ready, direction mismatch, or
+       * consensus count not yet reached). The branch was removed. */
     }
     else
     {
@@ -1724,7 +1918,7 @@ void sendUptime()
       */
 
       rateRejectCounter    = 0;
-      medianConsensusCount = 0;  // [NEW v7] reset consensus on plausible reading
+      medianConsensusCount = 0;  // [NEW v6.7] reset consensus on plausible reading
       controlledRecoveryActive = false;
     }
   }
@@ -1743,10 +1937,18 @@ void sendUptime()
       ppm5 = rawPPM;
 
       lastValidPPM = ppm5;
-
-      /* [NEW v7] Watchdog: record time of last accepted reading */
-      lastValidReadingTime = millis();
     }
+
+    /* [NEW v6.7] Watchdog: record time of last accepted reading.
+     *
+     * [v6.9 FIX 2] Moved outside the !controlledRecoveryActive guard.
+     * Previously, a controlled recovery that lasted longer than
+     * WATCHDOG_TIMEOUT_MS (5 min) would trigger a watchdog restart
+     * even though the system was actively processing measurements.
+     * The watchdog must be fed on every accepted path, including
+     * controlled recovery, to reflect that the measurement pipeline
+     * is alive and functioning. */
+    lastValidReadingTime = millis();
 
     updateDailyMinimum(ppm5);
 
@@ -1767,7 +1969,7 @@ void sendUptime()
     if (firstStepDone)
     {
       /* --------------------------------------------------------
-       * [NEW v7] ADAPTIVE ALPHA — replaces fixed 0.7/0.3 split.
+       * [NEW v6.7] ADAPTIVE ALPHA — replaces fixed 0.7/0.3 split.
        *
        * Priority order (highest wins):
        *   1. faultLatched            → 0.05 (conservative)
@@ -1810,7 +2012,7 @@ void sendUptime()
 
       firstStepDone = true;
 
-      /* [NEW v7] Initialize watchdog on first valid reading */
+      /* [NEW v6.7] Initialize watchdog on first valid reading */
       lastValidReadingTime = millis();
     }
   }
@@ -1821,8 +2023,8 @@ void sendUptime()
     if (
         diagState != "ABC_RECOVERY"  &&
         diagState != "RATE_REJECT"   &&
-        diagState != "FAULT_LATCHED" &&  // [NEW v7] preserve latched state
-        diagState != "SENSOR_STUCK"    // [NEW v7] preserve stuck state
+        diagState != "FAULT_LATCHED" &&  // [NEW v6.7] preserve latched state
+        diagState != "SENSOR_STUCK"    // [NEW v6.7] preserve stuck state
        )
     {
       diagState = "SENSOR_RECOVERY";
@@ -1830,15 +2032,13 @@ void sendUptime()
 
     ppm5 = lastValidPPM;
 
-    /* [NEW v7] Fault latched: hold smoother almost completely still */
-    if (faultLatched)
-    {
-      adaptiveAlpha = 0.05f;
-    }
-    else
-    {
-      adaptiveAlpha = 0.05f;  // conservative fallback (unchanged from v6 ~0.05)
-    }
+    /* [v6.9 FIX 4] Both branches of the original if (faultLatched) / else
+     * assigned the same value (0.05f), making the conditional dead code.
+     * Replaced with a single assignment. 0.05f is the correct conservative
+     * alpha for all invalid-measurement fallback paths: it almost holds the
+     * smoother still while still allowing negligible drift toward lastValidPPM.
+     * This covers faultLatched, sensorStuck, PWM timeout, and range errors. */
+    adaptiveAlpha = 0.05f;
 
     smoothPPM =
         (1.0f - adaptiveAlpha) * smoothPPM +
@@ -1846,7 +2046,7 @@ void sendUptime()
   }
 
   /* --------------------------------------------------------
-   * [NEW v7] LAYER 11 — Software watchdog check.
+   * [NEW v6.7] LAYER 11 — Software watchdog check.
    *
    * If no valid reading has been accepted for more than
    * WATCHDOG_TIMEOUT_MS, log the event and restart.
@@ -1925,7 +2125,7 @@ void sendUptime()
   Blynk.virtualWrite(12, smoothPPM);
 
   /* --------------------------------------------------------
-   * [NEW v8] UART CO2 READ — cross-check against PWM value.
+   * [NEW v6.8] UART CO2 READ — cross-check against PWM value.
    *
    * Called here, after the full PWM acquisition pipeline,
    * so the two reads cannot interfere with each other.
@@ -1976,7 +2176,7 @@ void sendUptime()
 
   /* ============================================================
    * SERIAL DIAGNOSTICS
-   * Extended in v7 with new protection layer fields.
+   * Extended in v6.7 with new protection layer fields.
    * ============================================================ */
 
   Serial.println();
@@ -2006,7 +2206,7 @@ void sendUptime()
   Serial.print("DIAG : ");
   Serial.println(diagState);
 
-  /* [NEW v7] Extended diagnostic fields */
+  /* [NEW v6.7] Extended diagnostic fields */
 
   Serial.print("ALPH : ");           // current adaptive smoothing alpha
   Serial.println(adaptiveAlpha, 2);
@@ -2055,7 +2255,7 @@ void sendUptime()
   Serial.print("RATE : ");           // rate-reject consecutive counter
   Serial.println(rateRejectCounter);
 
-  /* [NEW v8] UART cross-check and ABC state */
+  /* [NEW v6.8] UART cross-check and ABC state */
 
   Serial.print("UART : ");           // last UART CO2 reading in ppm
   if (lastUartPPM >= 0)
@@ -2078,7 +2278,35 @@ void sendUptime()
   if (counterLoos < 10)
     counterLoos++;
 
+  /* --------------------------------------------------------
+   * [v6.9 FIX 7] Daily restart re-entry guard.
+   *
+   * restartedToday is cleared at 02:00:00 each night so the
+   * window is re-armed for the following night. It is set to
+   * true immediately before ESP.restart() so that if the
+   * device reboots and comes back up before the 02:01 window
+   * closes, it does not restart a second time on the same night.
+   *
+   * The original 16-second window (seconds 2–17) at 02:01 is
+   * preserved. If NTP is unavailable the time never reaches
+   * 02:01 and no restart occurs (unchanged behaviour).
+   * -------------------------------------------------------- */
   if (
+      timeClient.getHours()   == 2 &&
+      timeClient.getMinutes() == 0 &&
+      timeClient.getSeconds() == 0
+     )
+  {
+    /* Re-arm the nightly window one minute before it opens */
+    if (restartedToday)
+    {
+      restartedToday = false;
+      Serial.println("[DAILY] restart window re-armed for tonight");
+    }
+  }
+
+  if (
+      !restartedToday              &&
       timeClient.getHours()   == 2 &&
       timeClient.getMinutes() == 1 &&
       timeClient.getSeconds() > 1 &&
@@ -2086,6 +2314,12 @@ void sendUptime()
      )
   {
     Serial.println("*** DAILY RESTART ***");
+
+    restartedToday = true;   // [v6.9 FIX 7] prevent second restart in same window
+
+    Serial.flush();          // ensure the log line is visible before reboot
+
+    delay(50);
 
     ESP.restart();
   }
@@ -2104,7 +2338,7 @@ void setup()
   Serial.println();
   Serial.println("===== BOOT START =====");
 
-  /* [NEW v8] Initialise SoftwareSerial for MH-Z19 UART.
+  /* [NEW v6.8] Initialise SoftwareSerial for MH-Z19 UART.
    * Must be called before the first sendUptime() runs.
    * 9600 baud is the fixed MH-Z19 UART baud rate.
    * If the UART wires are not yet connected this call is
@@ -2141,14 +2375,14 @@ void setup()
 
   lastDailyReset = millis();
 
-  /* [NEW v7] Initialize watchdog clock at boot.
+  /* [NEW v6.7] Initialize watchdog clock at boot.
    * Set to millis() so the watchdog does not fire
    * during the preheat period before firstStepDone
    * is set. The actual watchdog is only checked after
    * firstStepDone becomes true. */
   lastValidReadingTime = millis();
 
-  /* [NEW v7] Initialize median buffer to a safe
+  /* [NEW v6.7] Initialize median buffer to a safe
    * baseline value so that if computeMedian() is
    * called before the buffer is fully warmed up,
    * it returns a plausible starting point rather
