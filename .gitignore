@@ -13,6 +13,7 @@ venv/
 build/
 dist/
 *.spec
-*.txt
 blynk_history_*.csv
 *.service
+blynk_history_*.txt
+HOW_TO_*.txt

@@ -787,13 +787,13 @@ The firmware prints a diagnostic block every 5 seconds over USB serial (115200 b
 Dashboard (Windows EXE file):
 
 ```text
-v2.2
+v2.3
 ```
 
-Firmware (Arduino IDE):
+SensorValue6.ino (Firmware for Arduino IDE):
 
 ```text
-6/12/2026 by AM
+6/21/2026 by AM
 ```
 
 ---

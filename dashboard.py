@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v2.2 — background fetch thread (no UI freeze)
+# v2.3 — background fetch thread (no UI freeze) make enginering log put newest data on the top
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -13,6 +13,7 @@
 # │
 # ├── dashboard.py
 # ├── secrets.h
+# ├── abc_preferences.txt
 # └── co2_log.csv
 
 # IMPORTANT
@@ -290,6 +291,11 @@ def log_txt(message):
       - reconnect attempts
       - sensor fetch problems
       - parsing problems
+
+    Newest entries are written at the TOP of the file so the
+    most recent data is always visible without scrolling.
+    Existing content is read, the new line is prepended, and
+    the whole file is rewritten each call.
     """
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -298,8 +304,16 @@ def log_txt(message):
 
     print(line)
 
-    with open(TXT_LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    # Read existing content (empty string if file does not exist yet)
+    if os.path.exists(TXT_LOG_FILE):
+        with open(TXT_LOG_FILE, "r", encoding="utf-8") as f:
+            existing = f.read()
+    else:
+        existing = ""
+
+    # Prepend new line so newest entry is always at the top
+    with open(TXT_LOG_FILE, "w", encoding="utf-8") as f:
+        f.write(line + "\n" + existing)
 
 
 # ============================================================
