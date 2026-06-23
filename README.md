@@ -231,6 +231,7 @@ Note: The executable is a packaged version of the Python script. Both files requ
 * Engineering diagnostic messages
 * Live connection status indicator (`CONNECTED` / `OFFLINE`)
 * Last successful update timestamp
+* All 5 HTTP calls run in a background thread, the UI stays responsive
 
 ### Calibration Controls (v8)
 
@@ -786,7 +787,7 @@ The firmware prints a diagnostic block every 5 seconds over USB serial (115200 b
 Dashboard (Windows EXE file):
 
 ```text
-v2.1
+v2.2
 ```
 
 Firmware (Arduino IDE):
