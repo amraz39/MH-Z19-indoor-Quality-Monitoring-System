@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v2.1
+# v2.2 — background fetch thread (no UI freeze)
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -67,6 +67,7 @@
  - UART CO2 cross-check vs PWM with delta warning
  - ABC preference persistence — if user set ABC OFF, dashboard
    automatically re-enforces OFF if board reboots and resets to ON
+ - All HTTP fetches run in background thread — UI never freezes
 
 ============================================================
  REQUIRED FILES
@@ -134,6 +135,8 @@
 
 import os
 import re
+import queue
+import threading
 import requests
 import csv
 import pandas as pd
@@ -398,6 +401,7 @@ def write_virtual_pin(pin, value):
     except Exception as e:
         log_txt(f"PIN V{pin} WRITE ERROR: {e}")
         return False
+
 # ============================================================
 #
 # Downloads readable historical graph data from the local
@@ -734,6 +738,9 @@ abc_state = "unknown"
 # Counter used inside update_dashboard() to refresh the ABC
 # state periodically without adding a separate timer.
 # Refreshes every 12 cycles (= every ~60 seconds at 5s interval).
+#
+# Set to ABC_REFRESH_EVERY at startup so UART + ABC state is
+# checked immediately on the very first fetch cycle.
 
 abc_refresh_counter = 0
 ABC_REFRESH_EVERY   = 12
@@ -785,7 +792,6 @@ def _apply_abc_button_style():
             fg_color="gray40",
             hover_color="gray50"
         )
-
 
 
 # ============================================================
@@ -853,31 +859,6 @@ def save_abc_preference(preference):
 
     except Exception as e:
         log_txt(f"ABC preference save error: {e}")
-    """
-    Update button_abc colour and label to match abc_state.
-    Safe to call at any time after button_abc is created.
-    """
-
-    global abc_state
-
-    if abc_state == "enabled":
-        button_abc.configure(
-            text="ABC: ON",
-            fg_color="#1a6b2e",
-            hover_color="#2a8b3e"
-        )
-    elif abc_state == "disabled":
-        button_abc.configure(
-            text="ABC: OFF",
-            fg_color="#6b1a1a",
-            hover_color="#8b2a2a"
-        )
-    else:
-        button_abc.configure(
-            text="ABC: ?",
-            fg_color="gray40",
-            hover_color="gray50"
-        )
 
 
 def refresh_abc_state():
@@ -1126,23 +1107,25 @@ def _disable_uart_buttons():
 #
 # Called at startup and every ~60 seconds from update loop.
 #
+# In the threaded version, the V13 value is passed in from
+# the already-fetched result dict so no extra HTTP call is made.
+#
 # ============================================================
 
-def check_uart_availability():
+def check_uart_availability(uart_val):
     """
-    Query V13, update uart_available, enable/disable buttons.
+    Update uart_available and enable/disable buttons based on
+    a V13 value already fetched by the background thread.
     """
 
     global uart_available
 
-    val = read_virtual_pin(V_CO2_UART)
-
     # Valid UART signal: V13 must return a parseable number
     is_available = False
 
-    if val is not None:
+    if uart_val is not None:
         try:
-            float(val)
+            float(uart_val)
             is_available = True
         except (ValueError, TypeError):
             pass
@@ -1164,6 +1147,96 @@ def check_uart_availability():
     else:
         # Still available — refresh ABC state only
         refresh_abc_state()
+
+
+# ============================================================
+# BACKGROUND FETCH — THREAD + QUEUE
+# ============================================================
+#
+# All HTTP reads (5 pins per cycle) run in a daemon thread so
+# the tkinter main loop is never blocked.
+#
+# Pattern:
+#   _trigger_fetch()   — called by app.after() every interval;
+#                        starts a thread if none is running
+#   _fetch_worker()    — daemon thread; reads all pins, puts
+#                        result dict into _result_queue
+#   _poll_queue()      — called every 100 ms by app.after();
+#                        drains _result_queue and calls
+#                        _process_result() on the main thread
+#
+# Only the main thread touches tkinter widgets.
+#
+# ============================================================
+
+_result_queue  = queue.Queue()
+_fetch_running = False    # guard: only one fetch thread at a time
+
+
+def _fetch_worker():
+    """
+    Runs in a daemon thread.
+    Reads all Blynk pins then puts result dict into _result_queue.
+    """
+
+    global _fetch_running
+
+    try:
+        log_txt("Starting sensor acquisition cycle (background thread)")
+
+        result = {
+            "temp":     read_virtual_pin(10),
+            "hum":      read_virtual_pin(11),
+            "co2":      read_virtual_pin(12),
+            "msg":      read_virtual_pin(3),
+            "co2_uart": read_virtual_pin(V_CO2_UART),
+        }
+
+        _result_queue.put(result)
+
+    except Exception as e:
+        log_txt(f"Fetch worker error: {e}")
+        _result_queue.put(None)
+
+    finally:
+        _fetch_running = False
+
+
+def _trigger_fetch():
+    """
+    Scheduled every UPDATE_INTERVAL_MS by app.after().
+    Starts a new daemon fetch thread only if none is running.
+    """
+
+    global _fetch_running
+
+    if not _fetch_running:
+        _fetch_running = True
+        t = threading.Thread(target=_fetch_worker, daemon=True)
+        t.start()
+
+    app.after(UPDATE_INTERVAL_MS, _trigger_fetch)
+
+
+def _poll_queue():
+    """
+    Called every 100 ms by app.after().
+    Drains _result_queue and applies results to the GUI on the
+    main thread — the only thread allowed to touch tkinter widgets.
+    """
+
+    try:
+        while True:
+            result = _result_queue.get_nowait()
+            if result is not None:
+                try:
+                    _process_result(result)
+                except Exception as e:
+                    log_txt(f"PROCESS RESULT ERROR: {e}")
+    except queue.Empty:
+        pass
+
+    app.after(100, _poll_queue)
 
 
 # ============================================================
@@ -1543,8 +1616,7 @@ def on_graph_click(event):
     ts   = row["timestamp"].strftime("%H:%M:%S")
     temp = f"{row['temperature']:.1f}"
     hum  = f"{row['humidity']:.1f}"
-    #co2  = int(row["co2"])
-    co2 = round(float(row["co2"]), 1)
+    co2  = round(float(row["co2"]), 1)
 
     label_click_info.configure(
         text=f"🕐 {ts}    |    🌡 {temp} °C    |    💧 {hum} %    |    CO2: {co2} ppm",
@@ -1557,38 +1629,34 @@ def on_graph_click(event):
 canvas.mpl_connect("button_press_event", on_graph_click)
 
 # ============================================================
-# UPDATE LOOP
+# PROCESS RESULT
+# ============================================================
+#
+# Applies a result dict produced by _fetch_worker() to the GUI.
+# Always called on the main thread via _poll_queue().
+#
+# Replaces the original update_dashboard() body — identical
+# logic, but receives pre-fetched values instead of calling
+# read_virtual_pin() itself.
+#
 # ============================================================
 
-
-def update_dashboard():
+def _process_result(result):
     """
-    Main acquisition loop.
-
-    Reads:
-      - temperature
-      - humidity
-      - CO2
-      - engineering message
-
-    Updates:
-      - GUI
-      - CSV logs
-      - graph
-      - engineering TXT logs
-      - connection status indicator
-      - last updated timestamp
-      - CO2 colour coding
+    Apply fetched sensor data to all GUI widgets, CSV log,
+    and graph. Called on the main thread only.
     """
+
+    global current_df, abc_refresh_counter
 
     try:
-        log_txt("Starting sensor acquisition cycle")
+        log_txt("Processing sensor data on main thread")
 
-        temp     = read_virtual_pin(10)
-        hum      = read_virtual_pin(11)
-        co2      = read_virtual_pin(12)
-        msg      = read_virtual_pin(3)
-        co2_uart = read_virtual_pin(V_CO2_UART)
+        temp     = result.get("temp")
+        hum      = result.get("hum")
+        co2      = result.get("co2")
+        msg      = result.get("msg")
+        co2_uart = result.get("co2_uart")
 
         if temp is not None:
             label_temp_value.configure(text=f"{float(temp):.1f} °C")
@@ -1705,14 +1773,17 @@ def update_dashboard():
 # This means buttons automatically light up the first
 # time UART wires are connected, without restarting.
 #
+# abc_refresh_counter is initialised to ABC_REFRESH_EVERY
+# so the check runs immediately on the very first cycle,
+# enabling buttons at startup if UART is already wired.
+#
 # ====================================================
 
-        global abc_refresh_counter
         abc_refresh_counter += 1
 
         if abc_refresh_counter >= ABC_REFRESH_EVERY:
             abc_refresh_counter = 0
-            check_uart_availability()
+            check_uart_availability(co2_uart)
 
         if msg is not None:
             label_msg.configure(text=msg)
@@ -1769,7 +1840,6 @@ def update_dashboard():
                 df = df[df["timestamp"] >= cutoff]
 
                 # Keep a reference so on_graph_click() can look up values
-                global current_df
                 current_df = df.copy()
 
                 ax.clear()
@@ -1955,8 +2025,6 @@ def update_dashboard():
     except Exception as e:
         log_txt(f"MAIN LOOP ERROR: {e}")
 
-    app.after(UPDATE_INTERVAL_MS, update_dashboard)
-
 
 # ============================================================
 # STARTUP DIAGNOSTICS
@@ -1982,12 +2050,25 @@ except Exception as e:
 
 log_txt("Querying initial ABC state...")
 abc_user_preference = load_abc_preference()
-check_uart_availability()
 
 # ============================================================
-# START LOOP
+# INITIALISE abc_refresh_counter TO TRIGGER UART CHECK
+# ON THE VERY FIRST FETCH CYCLE
+# ============================================================
+#
+# Setting the counter to ABC_REFRESH_EVERY means the UART
+# availability check (and ABC button enable) fires immediately
+# on the first data cycle rather than waiting ~60 seconds.
+#
 # ============================================================
 
-update_dashboard()
+abc_refresh_counter = ABC_REFRESH_EVERY
+
+# ============================================================
+# START BACKGROUND FETCH LOOP + QUEUE POLLER
+# ============================================================
+
+app.after(100, _poll_queue)
+app.after(0,   _trigger_fetch)
 
 app.mainloop()
