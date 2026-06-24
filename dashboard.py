@@ -446,13 +446,140 @@ def download_blynk_history():
       - plain text responses
       - converts timestamps to readable date/time
       - exports readable TXT + CSV files
+
+    V3 (engineering/diagnostic message) history is downloaded first
+    from the new _text.txt endpoint added to the server. Its lines
+    use the format:
+        message,unix_ms_timestamp
+    (message first, then timestamp — opposite of numeric pins).
+
+    A timestamp-keyed lookup dict is built from V3 so that each CO2
+    record can be annotated with the nearest diagnostic message within
+    MSG_MATCH_TOLERANCE_S seconds. The message column appears in both
+    the CO2 TXT file and the global CSV export. Temperature and
+    humidity exports are not annotated (not relevant to those sensors).
     """
 
     import gzip
 
+    # ====================================================
+    # MESSAGE MATCH TOLERANCE
+    # ====================================================
+    #
+    # Maximum gap in seconds between a CO2 record timestamp
+    # and a V3 message timestamp for them to be considered
+    # a match. Sensor cycles run every 5 seconds so 30 s
+    # is generous without risking wrong-cycle matches.
+    #
+    # ====================================================
+
+    MSG_MATCH_TOLERANCE_S = 30
+
+    def _fetch_raw(pin):
+        """
+        Download and decompress history for a single pin.
+        Returns raw text or None on failure.
+        """
+        url = (
+            f"http://{BLYNK_SERVER}:{BLYNK_PORT}/"
+            f"{AUTH_TOKEN}/data/V{pin}"
+        )
+        log_txt(f"Downloading history from: {url}")
+        try:
+            response = requests.get(url, timeout=30)
+            log_txt(f"HTTP STATUS V{pin}: {response.status_code}")
+            if response.status_code != 200:
+                log_txt(f"Failed to download V{pin}")
+                return None
+            try:
+                text = gzip.decompress(
+                    response.content
+                ).decode("utf-8", errors="ignore")
+                log_txt(f"V{pin} decompressed using gzip")
+            except Exception:
+                text = response.text
+                log_txt(f"V{pin} was plain text")
+            log_txt(f"FIRST 500 CHARS:\n{text[:500]}")
+            return text
+        except Exception as e:
+            log_txt(f"V{pin} download error: {e}")
+            return None
+
     try:
 
         log_txt("Starting historical data download")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # ====================================================
+        # STEP 1 — DOWNLOAD V3 DIAGNOSTIC MESSAGE HISTORY
+        # ====================================================
+        #
+        # V3 text history file format (from updated server):
+        #   message,unix_ms_timestamp
+        #
+        # Note: message is FIRST, timestamp is SECOND.
+        # This is the opposite of numeric pins where the
+        # value comes first. The server stores it this way
+        # because the value is the text message itself.
+        #
+        # Build a lookup dict: { unix_ms (int) -> message (str) }
+        # ====================================================
+
+        msg_history = {}    # { unix_ms: message_string }
+
+        v3_text = _fetch_raw(3)
+
+        if v3_text:
+            for line in v3_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # Split on LAST comma to handle messages
+                # that may contain commas internally
+                idx = line.rfind(",")
+                if idx == -1:
+                    continue
+                try:
+                    msg_val = line[:idx].strip()
+                    ts_ms   = int(line[idx + 1:].strip())
+                    msg_history[ts_ms] = msg_val
+                except Exception as e:
+                    log_txt(f"V3 parse error: {line} -> {e}")
+
+            log_txt(
+                f"V3 message history loaded: "
+                f"{len(msg_history)} entries"
+            )
+        else:
+            log_txt(
+                "V3 message history unavailable — "
+                "message column will be empty"
+            )
+
+        def _lookup_message(ts_ms):
+            """
+            Find the closest V3 message to ts_ms within
+            MSG_MATCH_TOLERANCE_S. Returns message string
+            or empty string if no match found.
+            """
+            if not msg_history:
+                return ""
+            tolerance_ms = MSG_MATCH_TOLERANCE_S * 1000
+            best_key  = None
+            best_diff = float("inf")
+            for k in msg_history:
+                diff = abs(k - ts_ms)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_key  = k
+            if best_diff <= tolerance_ms:
+                return msg_history[best_key]
+            return ""
+
+        # ====================================================
+        # STEP 2 — DOWNLOAD NUMERIC SENSOR HISTORY
+        # ====================================================
 
         pins = {
             "temperature": 10,
@@ -460,10 +587,13 @@ def download_blynk_history():
             "co2": 12
         }
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
         # ====================================================
         # GLOBAL CSV EXPORT
+        # ====================================================
+        #
+        # CO2 rows include a "message" column sourced from V3.
+        # Temperature and humidity rows leave message blank.
+        #
         # ====================================================
 
         csv_file = f"blynk_history_export_{timestamp}.csv"
@@ -477,7 +607,8 @@ def download_blynk_history():
             writer.writerow([
                 "sensor",
                 "date_time",
-                "value"
+                "value",
+                "message"
             ])
 
             # ====================================================
@@ -488,60 +619,10 @@ def download_blynk_history():
 
                 try:
 
-                    url = (
-                        f"http://{BLYNK_SERVER}:{BLYNK_PORT}/"
-                        f"{AUTH_TOKEN}/data/V{pin}"
-                    )
+                    text = _fetch_raw(pin)
 
-                    log_txt(f"Downloading history from: {url}")
-
-                    response = requests.get(url, timeout=30)
-
-                    log_txt(
-                        f"HTTP STATUS V{pin}: "
-                        f"{response.status_code}"
-                    )
-
-                    if response.status_code != 200:
-
-                        log_txt(
-                            f"Failed to download V{pin}"
-                        )
-
+                    if text is None:
                         continue
-
-                    # ====================================================
-                    # TRY GZIP DECOMPRESSION
-                    # ====================================================
-
-                    try:
-
-                        text = gzip.decompress(
-                            response.content
-                        ).decode(
-                            "utf-8",
-                            errors="ignore"
-                        )
-
-                        log_txt(
-                            f"V{pin} decompressed using gzip"
-                        )
-
-                    except Exception:
-
-                        text = response.text
-
-                        log_txt(
-                            f"V{pin} was plain text"
-                        )
-
-                    # ====================================================
-                    # DEBUG OUTPUT
-                    # ====================================================
-
-                    log_txt(
-                        f"FIRST 500 CHARS:\n{text[:500]}"
-                    )
 
                     # ====================================================
                     # TXT FILE
@@ -559,14 +640,30 @@ def download_blynk_history():
                         encoding="utf-8"
                     ) as txtf:
 
-                        txtf.write(
-                            f"===== "
-                            f"{sensor_name.upper()} HISTORY "
-                            f"=====\n\n"
-                        )
+                        if sensor_name == "co2":
+                            txtf.write(
+                                f"===== CO2 HISTORY =====\n\n"
+                                f"{'Date/Time':<22}  "
+                                f"{'CO2 ppm':>10}  "
+                                f"Diagnostic Message\n"
+                                f"{'-'*22}  "
+                                f"{'-'*10}  "
+                                f"{'-'*40}\n"
+                            )
+                        else:
+                            txtf.write(
+                                f"===== "
+                                f"{sensor_name.upper()} HISTORY "
+                                f"=====\n\n"
+                            )
 
                         # ====================================================
                         # PARSE HISTORY LINES
+                        # ====================================================
+                        #
+                        # Numeric pin format:
+                        #   value,timestamp_ms,flag
+                        #
                         # ====================================================
 
                         lines = text.splitlines()
@@ -621,10 +718,20 @@ def download_blynk_history():
                                 # HUMAN READABLE TXT LINE
                                 # ============================================
 
-                                readable_line = (
-                                    f"{dt_str}    "
-                                    f"{value:.2f}"
-                                )
+                                if sensor_name == "co2":
+                                    # Look up nearest V3 diagnostic message
+                                    diag_msg = _lookup_message(ts_ms)
+                                    readable_line = (
+                                        f"{dt_str}  "
+                                        f"{value:>10.2f}  "
+                                        f"{diag_msg}"
+                                    )
+                                else:
+                                    diag_msg = ""
+                                    readable_line = (
+                                        f"{dt_str}    "
+                                        f"{value:.2f}"
+                                    )
 
                                 txtf.write(
                                     readable_line + "\n"
@@ -637,7 +744,8 @@ def download_blynk_history():
                                 writer.writerow([
                                     sensor_name,
                                     dt_str,
-                                    f"{value:.2f}"
+                                    f"{value:.2f}",
+                                    diag_msg
                                 ])
 
                                 rows_written += 1
@@ -689,7 +797,6 @@ def download_blynk_history():
             text=f"History download failed: {e}",
             text_color="#ff4444"
         )
-
 
 # ============================================================
 # GRAPH CLICK STATE

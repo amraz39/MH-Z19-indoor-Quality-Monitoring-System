@@ -28,7 +28,7 @@
  * v. 5/29/2026 by AM  (v6.7 original)
  * v. 6/12/2026 by AM  (v6.8 — UART cross-check, zero-cal, ABC control)
  * v. 6/14/2026 by AM  (v6.9 — logic audit and bug fixes, see list below)
- * v. 6/21/2026 by AM  (v6.10 — move IP address of the Blynk server into secrets.h)
+ * v. 6/24/2026 by AM  (v6.11 — trend-aware OK diagnostic states)
  *
  * ============================================================
  * v6.9 BUG FIXES AND IMPROVEMENTS
@@ -93,6 +93,15 @@
  *     - Stuck detection is now suppressed when smoothPPM
  *       is below STUCK_LOW_CO2_THRESHOLD (500 ppm), where
  *       integer repetition is physically normal behaviour.
+ *
+ *   [v6.11] STUCK_LOW_CO2_THRESHOLD lowered from 500 to 420 ppm.
+ *   The original 500 ppm guard was too wide — a genuinely frozen
+ *   PWM signal also outputs ~390 ppm (sensor default/reset value)
+ *   and was therefore invisible to stuck detection. Confirmed by
+ *   a real incident where the sensor was locked at 390 ppm with
+ *   no response to a breath test. 420 ppm covers only the true
+ *   NDIR noise floor while restoring stuck detection in the
+ *   390-500 ppm fresh-air range where freezes can actually occur.
  *
  * ------------------------------------------------------------
  *
@@ -380,7 +389,15 @@
  * These states are appended to Slovak messages:
  *
  *   [OK]
- *      Normal stable operation.
+ *      Normal stable operation, CO2 trend flat.
+ *
+ *   [OK_RISING]
+ *      (NEW v6.11) Normal operation, CO2 trending upward.
+ *      Matches "Vzduch sa zhorsuje." / "Zacni vetrat." messages.
+ *
+ *   [OK_FALLING]
+ *      (NEW v6.11) Normal operation, CO2 trending downward.
+ *      Matches "Vzduch je dobry." / "Kvalita sa zlepsuje." messages.
  *
  *   [OK_RECOVERED]
  *      System recovered from temporary instability.
@@ -818,12 +835,32 @@ long lastComputedMedian = -1;       // median value from last cycle (for diagnos
  *
  * STUCK_LOW_CO2_THRESHOLD:
  *   Stuck detection is additionally suppressed when the smoothed CO2 level
- *   is below this value (500 ppm). Integer repetition in fresh air is
- *   physically normal behaviour for this sensor and must not be flagged
- *   as a fault. Detection resumes once the level rises above the threshold.
+ *   is below this value (420 ppm, lowered from 500 in v6.11). Integer
+ *   repetition in true fresh air (~390-415 ppm) is physically normal
+ *   behaviour for this sensor and must not be flagged as a fault.
+ *   Detection resumes once the level rises above the threshold.
+ *   See v6.11 comment block below for full rationale.
  */
 #define STUCK_THRESHOLD          72   // cycles of identical reading → stuck (6 min)
-#define STUCK_LOW_CO2_THRESHOLD 500   // ppm below which stuck detection is suppressed
+
+/* [v6.11] STUCK_LOW_CO2_THRESHOLD lowered from 500 to 420 ppm.
+ *
+ * Rationale:
+ *   The original 500 ppm guard suppressed stuck detection across the
+ *   entire fresh-air operating range. In practice a genuinely frozen
+ *   PWM signal also reads ~390 ppm (the MH-Z19 default/reset output)
+ *   and was therefore invisible to stuck detection — confirmed by a
+ *   real-world incident where the sensor was locked at 390 ppm and
+ *   did not respond to a breath test (expected spike to 2000+ ppm).
+ *   Only a power cycle resolved it.
+ *
+ *   420 ppm is tight enough to cover only the true NDIR noise floor
+ *   (genuine fresh outdoor air, ~390-415 ppm) while allowing stuck
+ *   detection to fire at any level where a real CO2 change should
+ *   be visible. A breath test produces >1000 ppm delta which will
+ *   immediately break the stuck counter regardless of this guard.
+ */
+#define STUCK_LOW_CO2_THRESHOLD 420   // ppm below which stuck detection is suppressed
 
 long  prevRawForStuck  = -1;        // raw reading in the previous cycle
 int   stuckCounter     = 0;         // consecutive identical reading counter
@@ -1962,7 +1999,37 @@ void sendUptime()
     {
       if (!controlledRecoveryActive && !faultLatched)
       {
-        diagState = "OK";
+        /* --------------------------------------------------------
+         * [v6.11] TREND-AWARE OK STATE
+         *
+         * Replace the static "OK" tag with a context-aware variant
+         * that reflects the current CO2 trend from linear regression.
+         *
+         * This gives the dashboard message a live indication of
+         * whether the air quality is stable, improving, or worsening
+         * even during fully normal operation.
+         *
+         * Thresholds (slope in ppm/ms x 5000 ms interval):
+         *
+         *   |lrCoef[0]| < 0.000005  -> flat / stable  -> OK
+         *   lrCoef[0]  >  0.000005  -> rising CO2     -> OK_RISING
+         *   lrCoef[0]  < -0.000005  -> falling CO2    -> OK_FALLING
+         *
+         * The same 0.000005 threshold is already used in the
+         * userMsg selection block below, keeping both consistent.
+         * -------------------------------------------------------- */
+        if (abs(lrCoef[0]) < 0.000005)
+        {
+          diagState = "OK";
+        }
+        else if (lrCoef[0] > 0)
+        {
+          diagState = "OK_RISING";
+        }
+        else
+        {
+          diagState = "OK_FALLING";
+        }
       }
     }
 

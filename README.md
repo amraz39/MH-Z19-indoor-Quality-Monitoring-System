@@ -13,7 +13,7 @@ The system provides:
 * Real-time CO2 monitoring
 * Temperature and humidity monitoring
 * Historical graphing
-* CSV data logging
+* CSV data logging (including engineering messages)
 * Engineering diagnostics
 * Recovery logic for unstable measurements
 * Automatic reconnect handling
@@ -237,11 +237,11 @@ Note: The executable is a packaged version of the Python script. Both files requ
 
 Three buttons are available in the bottom bar next to the history selector:
 
-| Button              | Behaviour                                                                    |
-| ------------------- | ---------------------------------------------------------------------------- |
-| Download Server History | Downloads historical data stored on the Blynk server                    |
-| Zero Calibration    | Shows confirmation dialog, then sends zero-cal command via V20               |
-| ABC                 | Toggles ABC on/off via V21. Colour indicates current state (see table below) |
+| Button                  | Behaviour                                                                    |
+| ----------------------- | ---------------------------------------------------------------------------- |
+| Download Server History | Downloads historical data stored on the Blynk server                         |
+| Zero Calibration        | Shows confirmation dialog, then sends zero-cal command via V20               |
+| ABC                     | Toggles ABC on/off via V21. Colour indicates current state (see table below) |
 
 **ABC button states:**
 
@@ -288,6 +288,8 @@ Two log files are generated from real-time sensor data pulled from the Blynk ser
 ### Historical Data Output from Blynk Server
 
 Two historical CO2 sensor data files generated from the historical data (binary format) pulled from the Blynk server:
+UPDATE: latest version saves also messages (text data) which are saved in:
+`opt/blynk/data/user-email/history_1234567891_0_v3_text.txt`
 
 | File  (example file name)                       | Purpose                                               |
 | ----------------------------------------------- | ----------------------------------------------------- |
