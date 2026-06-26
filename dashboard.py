@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v2.3 — background fetch thread (no UI freeze) make enginering log put newest data on the top
+# v2.4 — background fetch thread (no UI freeze) make enginering log put newest data on the top
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -1370,7 +1370,10 @@ ctk.set_default_color_theme("blue")
 app = ctk.CTk()
 
 app.title("MH-Z19 CO2 Dashboard")
-app.geometry("1600x1200")
+app.geometry("1300x980")
+
+# ── App-level dark background ──────────────────────────────────────────────────
+app.configure(fg_color="#090d16")
 
 # ============================================================
 # TITLE
@@ -1378,82 +1381,91 @@ app.geometry("1600x1200")
 
 label_title = ctk.CTkLabel(
     app,
-    text="MH-Z19 Engineering Dashboard",
-    font=("Arial", 36, "bold")
+    text="MH-Z19  Engineering Dashboard",
+    font=("Segoe UI", 28, "bold"),
+    text_color="#f1f5f9"
 )
 
-label_title.pack(pady=20)
+label_title.pack(pady=(14, 6))
 
 # ============================================================
 # TOP FRAME
 # ============================================================
 
-frame_top = ctk.CTkFrame(app)
-frame_top.pack(fill="x", padx=20, pady=10)
+frame_top = ctk.CTkFrame(app, fg_color="transparent")
+frame_top.pack(fill="x", padx=16, pady=(4, 6))
 
 # ============================================================
 # TEMPERATURE
 # ============================================================
 
-frame_temp = ctk.CTkFrame(frame_top)
-frame_temp.pack(side="left", expand=True, fill="both", padx=10, pady=10)
+frame_temp = ctk.CTkFrame(frame_top, fg_color="#0f1623", corner_radius=14,
+                           border_width=1, border_color="#1a2332")
+frame_temp.pack(side="left", expand=True, fill="both", padx=8, pady=6)
 
 label_temp_title = ctk.CTkLabel(
     frame_temp,
-    text="Temperature",
-    font=("Arial", 20)
+    text="🌡  TEMPERATURE",
+    font=("Segoe UI", 11, "bold"),
+    text_color="#475569"
 )
-label_temp_title.pack(pady=10)
+label_temp_title.pack(pady=(10, 2))
 
 label_temp_value = ctk.CTkLabel(
     frame_temp,
     text="N/A °C",
-    font=("Arial", 48, "bold")
+    font=("Segoe UI", 44, "bold"),
+    text_color="#f1f5f9"
 )
-label_temp_value.pack(pady=30)
+label_temp_value.pack(pady=(4, 12))
 
 # ============================================================
 # HUMIDITY
 # ============================================================
 
-frame_hum = ctk.CTkFrame(frame_top)
-frame_hum.pack(side="left", expand=True, fill="both", padx=10, pady=10)
+frame_hum = ctk.CTkFrame(frame_top, fg_color="#0f1623", corner_radius=14,
+                          border_width=1, border_color="#1a2332")
+frame_hum.pack(side="left", expand=True, fill="both", padx=8, pady=6)
 
 label_hum_title = ctk.CTkLabel(
     frame_hum,
-    text="Humidity",
-    font=("Arial", 20)
+    text="💧  HUMIDITY",
+    font=("Segoe UI", 11, "bold"),
+    text_color="#475569"
 )
-label_hum_title.pack(pady=10)
+label_hum_title.pack(pady=(10, 2))
 
 label_hum_value = ctk.CTkLabel(
     frame_hum,
     text="N/A %",
-    font=("Arial", 48, "bold")
+    font=("Segoe UI", 44, "bold"),
+    text_color="#f1f5f9"
 )
-label_hum_value.pack(pady=30)
+label_hum_value.pack(pady=(4, 12))
 
 # ============================================================
 # CO2
 # ============================================================
 
-frame_co2 = ctk.CTkFrame(frame_top)
-frame_co2.pack(side="left", expand=True, fill="both", padx=10, pady=10)
+frame_co2 = ctk.CTkFrame(frame_top, fg_color="#0f1623", corner_radius=14,
+                          border_width=1, border_color="#1a2332")
+frame_co2.pack(side="left", expand=True, fill="both", padx=8, pady=6)
 
 label_co2_title = ctk.CTkLabel(
     frame_co2,
-    text="CO2",
-    font=("Arial", 20)
+    text="🌿  CO2",
+    font=("Segoe UI", 11, "bold"),
+    text_color="#475569"
 )
-label_co2_title.pack(pady=10)
+label_co2_title.pack(pady=(10, 2))
 
 label_co2_value = ctk.CTkLabel(
     frame_co2,
     text="N/A ppm",
-    font=("Arial", 56, "bold"),
+    font=("Segoe UI", 52, "bold"),
     text_color=CO2_COLOR_DEFAULT
 )
-label_co2_value.pack(pady=30)
+label_co2_value.pack(pady=(4, 4))
 
 # ============================================================
 # CO2 UART CROSS-CHECK LABEL
@@ -1472,10 +1484,10 @@ label_co2_value.pack(pady=30)
 label_co2_uart = ctk.CTkLabel(
     frame_co2,
     text="UART: N/A",
-    font=("Arial", 16),
+    font=("Segoe UI", 13),
     text_color="gray"
 )
-label_co2_uart.pack(pady=4)
+label_co2_uart.pack(pady=(2, 10))
 
 # ============================================================
 # MESSAGE
@@ -1484,15 +1496,16 @@ label_co2_uart.pack(pady=4)
 label_msg = ctk.CTkLabel(
     app,
     text="N/A",
-    font=("Arial", 22)
+    font=("Segoe UI", 14),
+    text_color="#64748b"
 )
-label_msg.pack(pady=20)
+label_msg.pack(pady=(4, 6))
 
 # ============================================================
 # GRAPH
 # ============================================================
 
-figure = Figure(figsize=(14, 6), dpi=100)
+figure = Figure(figsize=(12, 5), dpi=100)
 ax = figure.add_subplot(111)
 
 # ============================================================
@@ -1510,20 +1523,20 @@ ax = figure.add_subplot(111)
 #
 # ============================================================
 
-figure.patch.set_facecolor("#2b2b2b")
-ax.set_facecolor("#3a3a3a")
+figure.patch.set_facecolor("#090d16")
+ax.set_facecolor("#0f1623")
 
-ax.tick_params(colors="white")
+ax.tick_params(colors="#94a3b8")
 
-ax.xaxis.label.set_color("white")
-ax.yaxis.label.set_color("white")
-ax.title.set_color("white")
+ax.xaxis.label.set_color("#94a3b8")
+ax.yaxis.label.set_color("#94a3b8")
+ax.title.set_color("#f1f5f9")
 
 for spine in ax.spines.values():
-    spine.set_color("white")
+    spine.set_color("#1a2332")
 
 canvas = FigureCanvasTkAgg(figure, master=app)
-canvas.get_tk_widget().pack(fill="both", expand=True, padx=20, pady=20)
+canvas.get_tk_widget().pack(fill="both", expand=True, padx=16, pady=(4, 4))
 
 # ============================================================
 # GRAPH CLICK INFO LABEL
@@ -1541,10 +1554,10 @@ canvas.get_tk_widget().pack(fill="both", expand=True, padx=20, pady=20)
 label_click_info = ctk.CTkLabel(
     app,
     text="Click any point on the graph to inspect sensor values",
-    font=("Arial", 16),
-    text_color="gray"
+    font=("Segoe UI", 13),
+    text_color="#475569"
 )
-label_click_info.pack(pady=6)
+label_click_info.pack(pady=(2, 4))
 
 # ============================================================
 # HISTORY SELECTION
@@ -1552,27 +1565,40 @@ label_click_info.pack(pady=6)
 
 history_var = ctk.StringVar(value="24")
 
-frame_bottom = ctk.CTkFrame(app)
-frame_bottom.pack(fill="x", padx=20, pady=10)
+frame_bottom = ctk.CTkFrame(app, fg_color="#0f1623", corner_radius=12,
+                             border_width=1, border_color="#2a3a52",
+                             height=40)
+frame_bottom.pack(fill="x", padx=16, pady=(4, 10))
+frame_bottom.pack_propagate(False)
 
 label_hist = ctk.CTkLabel(
     frame_bottom,
-    text="Graph History"
+    text="Graph History",
+    font=("Segoe UI", 12),
+    text_color="#64748b"
 )
 label_hist.pack(side="left", padx=10)
 
 option_history = ctk.CTkOptionMenu(
     frame_bottom,
     variable=history_var,
-    values=["1", "3", "24", "48", "168"]
+    values=["1", "3", "24", "48", "168"],
+    fg_color="#1a2332",
+    button_color="#1e3a5f",
+    button_hover_color="#22d3ee",
+    dropdown_fg_color="#0f1623",
+    text_color="#f1f5f9",
+    font=("Segoe UI", 12)
 )
-option_history.pack(side="left", padx=10)
+option_history.pack(side="left", padx=8)
 
 label_hist_desc = ctk.CTkLabel(
     frame_bottom,
-    text="Hours (168h = 7 days)"
+    text="Hours  (168h = 7 days)",
+    font=("Segoe UI", 12),
+    text_color="#475569"
 )
-label_hist_desc.pack(side="left", padx=10)
+label_hist_desc.pack(side="left", padx=8)
 
 
 # ============================================================
@@ -1593,10 +1619,15 @@ label_hist_desc.pack(side="left", padx=10)
 button_download_history = ctk.CTkButton(
     frame_bottom,
     text="Download Server History",
-    command=download_blynk_history
+    command=download_blynk_history,
+    fg_color="#1e3a5f",
+    hover_color="#22d3ee",
+    text_color="#f1f5f9",
+    font=("Segoe UI", 12),
+    corner_radius=8
 )
 
-button_download_history.pack(side="left", padx=20)
+button_download_history.pack(side="left", padx=16)
 
 # ============================================================
 # ZERO CALIBRATION BUTTON
@@ -1620,10 +1651,12 @@ button_zero_cal = ctk.CTkButton(
     fg_color="gray40",
     hover_color="gray50",
     state="disabled",
-    command=trigger_zero_calibration
+    command=trigger_zero_calibration,
+    font=("Segoe UI", 12),
+    corner_radius=8
 )
 
-button_zero_cal.pack(side="left", padx=10)
+button_zero_cal.pack(side="left", padx=8)
 
 # ============================================================
 # ABC STATE BUTTON
@@ -1652,10 +1685,12 @@ button_abc = ctk.CTkButton(
     fg_color="gray40",
     hover_color="gray50",
     state="disabled",
-    command=toggle_abc
+    command=toggle_abc,
+    font=("Segoe UI", 12),
+    corner_radius=8
 )
 
-button_abc.pack(side="left", padx=10)
+button_abc.pack(side="left", padx=8)
 
 
 # ============================================================
@@ -1675,10 +1710,10 @@ button_abc.pack(side="left", padx=10)
 label_status = ctk.CTkLabel(
     frame_bottom,
     text="⬤  CONNECTING...",
-    font=("Arial", 14),
-    text_color="gray"
+    font=("Segoe UI", 12, "bold"),
+    text_color="#475569"
 )
-label_status.pack(side="right", padx=20)
+label_status.pack(side="right", padx=16)
 
 # ============================================================
 # LAST UPDATED TIMESTAMP
@@ -1692,10 +1727,10 @@ label_status.pack(side="right", padx=20)
 label_last_update = ctk.CTkLabel(
     frame_bottom,
     text="Last update: --:--:--",
-    font=("Arial", 13),
-    text_color="gray"
+    font=("Segoe UI", 12),
+    text_color="#475569"
 )
-label_last_update.pack(side="right", padx=20)
+label_last_update.pack(side="right", padx=16)
 
 # ============================================================
 # GRAPH CLICK HANDLER
@@ -1976,17 +2011,17 @@ def _process_result(result):
 #
 # ====================================================
 
-                figure.patch.set_facecolor("#2b2b2b")
-                ax.set_facecolor("#3a3a3a")
+                figure.patch.set_facecolor("#090d16")
+                ax.set_facecolor("#0f1623")
 
-                ax.tick_params(colors="white")
+                ax.tick_params(colors="#94a3b8")
 
-                ax.xaxis.label.set_color("white")
-                ax.yaxis.label.set_color("white")
-                ax.title.set_color("white")
+                ax.xaxis.label.set_color("#94a3b8")
+                ax.yaxis.label.set_color("#94a3b8")
+                ax.title.set_color("#f1f5f9")
 
                 for spine in ax.spines.values():
-                    spine.set_color("white")
+                    spine.set_color("#1a2332")
 
 # ====================================================
 # PLOT CO2 DATA
@@ -2074,16 +2109,16 @@ def _process_result(result):
                     )
 
                 ax.legend(
-                    facecolor="#3a3a3a",
-                    edgecolor="white",
-                    labelcolor="white"
+                    facecolor="#0f1623",
+                    edgecolor="#1a2332",
+                    labelcolor="#94a3b8"
                 )
 
-                ax.set_title(f"CO2 History ({hours}h)", fontsize=20, fontweight="bold")
-                ax.set_ylabel("ppm", fontsize=16, fontweight="bold")
-                ax.set_xlabel("Time", fontsize=16, fontweight="bold")
-                ax.tick_params(axis="both", labelsize=13)
-                ax.grid(True, color="#555555", linestyle="--", linewidth=0.5)
+                ax.set_title(f"CO2 History ({hours}h)", fontsize=15, fontweight="bold")
+                ax.set_ylabel("ppm", fontsize=12, fontweight="bold")
+                ax.set_xlabel("Time", fontsize=12, fontweight="bold")
+                ax.tick_params(axis="both", labelsize=10)
+                ax.grid(True, color="#1a2332", linestyle="--", linewidth=0.6)
 
 # ====================================================
 # FORCE EXACTLY 6 EVENLY-SPACED TIME TICKS ON X AXIS
