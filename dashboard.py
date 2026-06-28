@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v2.4 — background fetch thread (no UI freeze) make enginering log put newest data on the top
+# v2.5 — WiFi RSSI signal strength display in bottom bar (V14)
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -234,6 +234,7 @@ CO2_COLOR_DEFAULT  = "white"
 # ============================================================
 
 V_CO2_UART  = 13   # UART CO2 reading sent each cycle by INO
+V_WIFI_RSSI = 14   # WiFi RSSI in dBm         [NEW v6.12]
 V_ZERO_CAL  = 20   # write 1 to trigger zero calibration
 V_ABC_STATE = 21   # read 1=enabled/0=disabled; write to toggle
 
@@ -1311,6 +1312,7 @@ def _fetch_worker():
             "co2":      read_virtual_pin(12),
             "msg":      read_virtual_pin(3),
             "co2_uart": read_virtual_pin(V_CO2_UART),
+            "rssi":     read_virtual_pin(V_WIFI_RSSI),   # [NEW v6.12] WiFi signal strength
         }
 
         _result_queue.put(result)
@@ -1565,6 +1567,44 @@ label_click_info.pack(pady=(2, 4))
 
 history_var = ctk.StringVar(value="24")
 
+# ============================================================
+# WIFI SIGNAL HELPER
+# ============================================================
+#
+# Converts raw RSSI dBm to a 0–100 % quality value and
+# picks an icon reflecting signal strength:
+#
+#   ≥ -50 dBm  →  excellent  📶 100–75 %
+#   ≥ -65 dBm  →  good       📶  74–50 %
+#   ≥ -75 dBm  →  fair       📶  49–25 %
+#    < -75 dBm  →  poor       📶  24–0  %
+#
+# Formula maps -30 dBm (best practical) → 100 %
+#                       -90 dBm (edge)   →   0 %
+#
+# ============================================================
+
+def rssi_to_quality(rssi_dbm):
+    """
+    Convert RSSI dBm to 0-100% quality.
+    Clamps to [0, 100].
+    """
+    quality = max(0, min(100, 2 * (rssi_dbm + 100)))
+    return quality
+
+
+def rssi_icon(quality):
+    """Return a WiFi bar icon based on quality %."""
+    if quality >= 75:
+        return "▂▄▆█"
+    elif quality >= 50:
+        return "▂▄▆░"
+    elif quality >= 25:
+        return "▂▄░░"
+    else:
+        return "▂░░░"
+
+
 frame_bottom = ctk.CTkFrame(app, fg_color="#0f1623", corner_radius=12,
                              border_width=1, border_color="#2a3a52",
                              height=40)
@@ -1707,6 +1747,24 @@ button_abc.pack(side="left", padx=8)
 #
 # ============================================================
 
+# ============================================================
+# WIFI SIGNAL STRENGTH DISPLAY
+# ============================================================
+#
+# Shows live WiFi RSSI (dBm) from the ESP8266 sensor node
+# and derived quality percentage. Updated every fetch cycle.
+# Icon bars reflect signal tier visually.
+#
+# ============================================================
+
+label_wifi = ctk.CTkLabel(
+    frame_bottom,
+    text="📡  WiFi: —",
+    font=("Segoe UI", 12),
+    text_color="#475569"
+)
+label_wifi.pack(side="right", padx=12)
+
 label_status = ctk.CTkLabel(
     frame_bottom,
     text="⬤  CONNECTING...",
@@ -1813,12 +1871,47 @@ def _process_result(result):
         co2      = result.get("co2")
         msg      = result.get("msg")
         co2_uart = result.get("co2_uart")
+        rssi     = result.get("rssi")   # [NEW v6.12] WiFi RSSI in dBm
 
         if temp is not None:
             label_temp_value.configure(text=f"{float(temp):.1f} °C")
 
         if hum is not None:
             label_hum_value.configure(text=f"{float(hum):.1f} %")
+
+        # ====================================================
+        # WIFI SIGNAL STRENGTH UPDATE                [v6.12]
+        # ====================================================
+        #
+        # rssi is raw dBm from V14 (written by ESP8266 each
+        # cycle). Converted to quality % for display.
+        # Label goes grey if not available.
+        #
+        # ====================================================
+
+        if rssi is not None:
+            try:
+                rssi_dbm  = int(float(rssi))
+                quality   = rssi_to_quality(rssi_dbm)
+                icon      = rssi_icon(quality)
+
+                if quality >= 75:
+                    wifi_color = "#22c55e"    # green — excellent
+                elif quality >= 50:
+                    wifi_color = "#22d3ee"    # cyan  — good
+                elif quality >= 25:
+                    wifi_color = "#f59e0b"    # amber — fair
+                else:
+                    wifi_color = "#ef4444"    # red   — poor
+
+                label_wifi.configure(
+                    text=f"{icon}  {rssi_dbm} dBm  ({quality}%)",
+                    text_color=wifi_color
+                )
+            except (ValueError, TypeError):
+                label_wifi.configure(text="📡  WiFi: —", text_color="#475569")
+        else:
+            label_wifi.configure(text="📡  WiFi: —", text_color="#475569")
 
         # ====================================================
         # CONNECTION STATUS UPDATE

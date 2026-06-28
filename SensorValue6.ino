@@ -28,7 +28,7 @@
  * v. 5/29/2026 by AM  (v6.7 original)
  * v. 6/12/2026 by AM  (v6.8 — UART cross-check, zero-cal, ABC control)
  * v. 6/14/2026 by AM  (v6.9 — logic audit and bug fixes, see list below)
- * v. 6/24/2026 by AM  (v6.11 — trend-aware OK diagnostic states)
+ * v. 6/28/2026 by AM  (v6.12 — WiFi RSSI reported on V14)
  *
  * ============================================================
  * v6.9 BUG FIXES AND IMPROVEMENTS
@@ -516,6 +516,11 @@
  *            Written ONLY when readCO2UART() succeeds.
  *            If wires not connected → never written →
  *            dashboard reads None → buttons stay disabled.
+ *
+ *   V14  = WiFi RSSI (dBm)            [NEW v6.12]
+ *            Written each cycle. Raw dBm value from
+ *            WiFi.RSSI(). Dashboard converts to quality %.
+ *            Typical range: -30 (excellent) to -90 (poor).
  *
  *   V20  = zero calibration trigger   [NEW v6.8]
  *            BLYNK_WRITE handler.
@@ -2190,6 +2195,17 @@ void sendUptime()
   Blynk.virtualWrite(10, smoothTemp);
   Blynk.virtualWrite(11, smoothHum);
   Blynk.virtualWrite(12, smoothPPM);
+
+  /* --------------------------------------------------------
+   * [NEW v6.12] WIFI RSSI — signal strength in dBm.
+   *
+   * Written every cycle so the dashboard can display
+   * live signal strength and quality.
+   * WiFi.RSSI() returns a negative dBm value while
+   * connected; 0 or positive values indicate no reading.
+   * -------------------------------------------------------- */
+
+  Blynk.virtualWrite(14, WiFi.RSSI());
 
   /* --------------------------------------------------------
    * [NEW v6.8] UART CO2 READ — cross-check against PWM value.

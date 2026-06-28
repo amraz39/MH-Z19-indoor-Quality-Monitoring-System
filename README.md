@@ -18,6 +18,7 @@ The system provides:
 * Recovery logic for unstable measurements
 * Automatic reconnect handling
 * Dark-theme desktop dashboard
+* WiFi RSSI monitoring (WiFi signal strength and quality)
 
 ---
 
@@ -789,13 +790,13 @@ The firmware prints a diagnostic block every 5 seconds over USB serial (115200 b
 Dashboard (Windows EXE file):
 
 ```text
-v2.3
+v2.5
 ```
 
 SensorValue6.ino (Firmware for Arduino IDE):
 
 ```text
-6/21/2026 by AM
+6/28/2026 by AM
 ```
 
 ---
