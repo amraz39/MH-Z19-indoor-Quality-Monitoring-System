@@ -141,6 +141,7 @@ The firmware implements a multi-layer protection architecture:
 | 9     | Fault latching                | Prevent rapid OK/FAULT state oscillation         |
 | 10    | Adaptive plausibility limits  | Context-aware rate and smoothing thresholds      |
 | 11    | Software watchdog restart     | Auto-restart after 5 min with no valid reading   |
+| 12    | Adding offset to measured val | Send 3 x soft-reset then ESP.restart()           |
 
 ---
 
@@ -175,6 +176,8 @@ The firmware appends diagnostic states to Slovak status messages.
 | `[WIFI_LOST]`       | WiFi disconnected                                 |
 | `[BLYNK_LOST]`      | Blynk disconnected                                |
 | `[WIFI_RECONNECT]`  | Reconnection in progress                          |
+| `[OFFSET_FAULT]`    | Offset added to measured value sensed in data     |
+| `[OFFSET_RECOVERY]` | Offset recovery from fault                        |
 
 ---
 
@@ -233,6 +236,9 @@ Note: The executable is a packaged version of the Python script. Both files requ
 * Live connection status indicator (`CONNECTED` / `OFFLINE`)
 * Last successful update timestamp
 * All 5 HTTP calls run in a background thread, the UI stays responsive
+* Check WiFi signal strength and quality
+* Save last 7 days of data in TXT and CSV files
+* Download all data from the server (contain data even if app is not run)
 
 ### Calibration Controls (v8)
 

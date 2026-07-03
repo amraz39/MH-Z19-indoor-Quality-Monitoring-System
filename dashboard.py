@@ -190,6 +190,26 @@ CSV_LOG_FILE = "co2_log.csv"
 TXT_LOG_FILE = "engineering_log.txt"
 
 # ============================================================
+# LOG RETENTION POLICY
+# ============================================================
+#
+# Both co2_log.csv and engineering_log.txt are trimmed once
+# per hour to keep only the last LOG_RETENTION_DAYS days of
+# data. This matches the maximum graph display window (7 days)
+# and prevents the files from growing indefinitely over long
+# unattended operation.
+#
+# The trim is done in-memory (read → filter → write) so it
+# is safe to call while the dashboard is running. The hourly
+# schedule means at most one extra day of data can accumulate
+# between trims.
+#
+# ============================================================
+
+LOG_RETENTION_DAYS = 7          # days of data to keep in log files
+LOG_TRIM_INTERVAL_MS = 3600000  # trim once per hour (ms)
+
+# ============================================================
 # ABC PREFERENCE FILE
 # ============================================================
 #
@@ -437,6 +457,150 @@ def write_virtual_pin(pin, value):
 #   timestamp = unix milliseconds
 #
 # ============================================================
+
+def trim_log_files():
+    """
+    Remove entries older than LOG_RETENTION_DAYS from both
+    co2_log.csv and engineering_log.txt.
+
+    Called once per hour via app.after() so that neither file
+    grows without bound during long unattended operation.
+
+    co2_log.csv:
+        Parsed with pandas. Rows whose 'timestamp' column
+        is older than the retention cutoff are dropped and
+        the file is rewritten. If the file is absent or the
+        timestamp column cannot be parsed, the function logs
+        the issue and skips that file without raising.
+
+    engineering_log.txt:
+        Each line starts with a [YYYY-MM-DD HH:MM:SS] prefix
+        (written by log_txt). Lines whose embedded timestamp
+        is older than the cutoff are dropped and the file is
+        rewritten. Lines that cannot be parsed (e.g. blank
+        lines or legacy format) are kept to avoid silent data
+        loss.
+
+    Both rewrites are atomic within Python: the filtered
+    content is assembled in memory and written in one call,
+    so a crash mid-write leaves the previous file intact
+    (the OS write may be partial, but no data is deleted
+    before the new content is ready).
+    """
+
+    cutoff = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
+
+    log_txt(f"[TRIM] Running log trim — keeping data after {cutoff.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # ====================================================
+    # TRIM co2_log.csv
+    # ====================================================
+
+    try:
+
+        if os.path.exists(CSV_LOG_FILE):
+
+            df = pd.read_csv(CSV_LOG_FILE)
+
+            if 'timestamp' in df.columns:
+
+                df['timestamp'] = pd.to_datetime(
+                    df['timestamp'],
+                    errors='coerce'
+                )
+
+                before = len(df)
+
+                df = df[df['timestamp'] >= cutoff]
+
+                after = len(df)
+
+                df.to_csv(CSV_LOG_FILE, index=False)
+
+                log_txt(
+                    f"[TRIM] co2_log.csv: "
+                    f"removed {before - after} rows, "
+                    f"{after} remaining"
+                )
+
+            else:
+
+                log_txt("[TRIM] co2_log.csv: no 'timestamp' column — skipped")
+
+    except Exception as e:
+
+        log_txt(f"[TRIM] co2_log.csv error: {e}")
+
+    # ====================================================
+    # TRIM engineering_log.txt
+    # ====================================================
+
+    try:
+
+        if os.path.exists(TXT_LOG_FILE):
+
+            with open(TXT_LOG_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            kept   = []
+            removed = 0
+
+            for line in lines:
+
+                # Each line written by log_txt starts with:
+                # [YYYY-MM-DD HH:MM:SS]
+                stripped = line.strip()
+
+                if stripped.startswith("[") and len(stripped) > 21:
+
+                    try:
+
+                        ts = datetime.strptime(
+                            stripped[1:20],
+                            "%Y-%m-%d %H:%M:%S"
+                        )
+
+                        if ts >= cutoff:
+                            kept.append(line)
+                        else:
+                            removed += 1
+
+                    except ValueError:
+
+                        # Line has [ prefix but unparseable timestamp — keep it
+                        kept.append(line)
+
+                else:
+
+                    # Blank line or non-timestamped line — keep it
+                    kept.append(line)
+
+            with open(TXT_LOG_FILE, "w", encoding="utf-8") as f:
+                f.writelines(kept)
+
+            log_txt(
+                f"[TRIM] engineering_log.txt: "
+                f"removed {removed} lines, "
+                f"{len(kept)} remaining"
+            )
+
+    except Exception as e:
+
+        log_txt(f"[TRIM] engineering_log.txt error: {e}")
+
+
+def _schedule_trim():
+    """
+    Run trim_log_files() then reschedule itself for the next
+    hour. Using app.after() keeps the trim on the main thread
+    so no locking is needed around file I/O that other main-
+    thread callbacks also perform.
+    """
+
+    trim_log_files()
+
+    app.after(LOG_TRIM_INTERVAL_MS, _schedule_trim)
+
 
 def download_blynk_history():
     """
@@ -2319,5 +2483,18 @@ abc_refresh_counter = ABC_REFRESH_EVERY
 
 app.after(100, _poll_queue)
 app.after(0,   _trigger_fetch)
+
+# ============================================================
+# SCHEDULE HOURLY LOG TRIM
+# ============================================================
+#
+# First trim runs 60 seconds after startup so the dashboard
+# has time to fully initialise before doing file I/O.
+# _schedule_trim() reschedules itself after each run so no
+# external timer management is needed.
+#
+# ============================================================
+
+app.after(60000, _schedule_trim)
 
 app.mainloop()
