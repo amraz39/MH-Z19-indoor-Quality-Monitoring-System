@@ -1536,7 +1536,7 @@ ctk.set_default_color_theme("blue")
 app = ctk.CTk()
 
 app.title("MH-Z19 CO2 Dashboard")
-app.geometry("1300x980")
+app.geometry("1400x980")
 
 # ── App-level dark background ──────────────────────────────────────────────────
 app.configure(fg_color="#090d16")
