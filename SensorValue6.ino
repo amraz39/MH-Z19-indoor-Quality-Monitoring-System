@@ -29,6 +29,7 @@
  * v. 6/12/2026 by AM  (v6.8 — UART cross-check, zero-cal, ABC control)
  * v. 6/14/2026 by AM  (v6.9 — logic audit and bug fixes, see list below)
  * v. 6/28/2026 by AM  (v6.12 — WiFi RSSI reported on V14)
+ * v. 7/03/2026 by AM  (v6.13 — LAYER 12: UART sensor offset auto-recovery)
  *
  * ============================================================
  * v6.9 BUG FIXES AND IMPROVEMENTS
@@ -323,6 +324,46 @@
  *
  * ------------------------------------------------------------
  *
+ * LAYER 12 — UART sensor offset fault detection and auto soft-reset  [NEW v6.13]
+ *
+ *   PROBLEM OBSERVED:
+ *   The sensor sometimes shifts its baseline upward by a large fixed
+ *   offset (400-500 ppm) and holds it indefinitely. Both PWM and UART
+ *   are elevated equally — delta stays small (~80 ppm) — so no existing
+ *   layer detects it. Only a power cycle restores normal operation.
+ *
+ *   ROOT CAUSE:
+ *   Internal MH-Z19 NDIR baseline corruption. The sensor's onboard MCU
+ *   loses its zero reference. This is distinct from ABC recalibration
+ *   (ABC shifts slowly over 24h; this fault shifts suddenly by hundreds
+ *   of ppm) and from PWM corruption (both UART and PWM are affected).
+ *
+ *   DETECTION (all must be true):
+ *   1. Both PWM smoothPPM and UART are above OFFSET_FAULT_PPM_THRESHOLD.
+ *   2. dailyMinPPM < OFFSET_FAULT_BASELINE_MAX — room was clean today.
+ *   3. Condition persists for OFFSET_FAULT_CONFIRM_CYCLES consecutive
+ *      cycles (30 s) — rules out real transient spikes.
+ *
+ *   RECOVERY:
+ *   1. Send MH-Z19 UART soft-reset (0xFF 0x01 0x8D ... 0x72).
+ *      Sensor restarts its internal cycle (~5 s), then resumes.
+ *   2. Reset firmware state (smoother, median, stuck, fault latch).
+ *   3. After OFFSET_FAULT_MAX_RESETS failures, escalate to ESP.restart().
+ *
+ *   SOFT RESET COMMAND:
+ *     0xFF 0x01 0x8D 0x00 0x00 0x00 0x00 0x00 0x72
+ *     Checksum: sum = 0x01+0x8D = 0x8E; ~0x8E+1 = 0x72  ok
+ *     Sensor sends NO response.
+ *
+ *   NEW DIAG STATES:
+ *     [OFFSET_FAULT]     detected, soft reset about to be sent
+ *     [OFFSET_RECOVERY]  reset sent, waiting for normal output
+ *
+ *   NEW SERIAL FIELD:
+ *     OFST   offset fault cycle counter / total reset count
+ *
+ * ------------------------------------------------------------
+ *
  * LAYER 11 — Software watchdog restart
  *
  *   lastValidReadingTime is updated on every accepted
@@ -444,6 +485,16 @@
  *   [WATCHDOG]
  *      (NEW) No valid reading for WATCHDOG_TIMEOUT_MS.
  *      Device will restart immediately after logging.
+ *
+ *   [OFFSET_FAULT]
+ *      (NEW v6.13) Both PWM and UART sustained above
+ *      OFFSET_FAULT_PPM_THRESHOLD while daily baseline
+ *      was low. Internal sensor offset corruption detected.
+ *      Soft reset command being sent via UART.
+ *
+ *   [OFFSET_RECOVERY]
+ *      (NEW v6.13) Soft reset sent. Waiting for sensor
+ *      to resume normal output. All firmware state reset.
  *
  *   [WIFI_LOST]
  *      WiFi disconnected.
@@ -935,6 +986,46 @@ float adaptiveAlpha     = 0.30f;    // current cycle smoothing alpha
 unsigned long lastValidReadingTime = 0; // millis() of last accepted measurement
 
 /* ============================================================
+ * [NEW v6.13] LAYER 12 — UART SENSOR OFFSET FAULT DETECTION
+ *
+ * These constants and variables control the automatic
+ * detection and recovery of the MH-Z19 internal baseline
+ * offset fault. See LAYER 12 comment block in the header
+ * for full rationale and recovery sequence description.
+ * ============================================================ */
+
+/* PPM level above which both PWM and UART must sit to
+ * suspect an offset fault. Chosen above all plausible
+ * real indoor CO2 levels without active fire or unusual
+ * source (1200 ppm is the ventilate-urgently threshold).
+ * If room CO2 can genuinely reach this level in your use
+ * case, raise to 1500 or 1800. */
+#define OFFSET_FAULT_PPM_THRESHOLD    1200  // ppm — both channels must exceed this
+
+/* Daily minimum must be below this to confirm the room
+ * had clean air recently. If dailyMinPPM is also high,
+ * the room may genuinely have elevated CO2 (e.g. poor
+ * ventilation all day) and we should not reset the sensor. */
+#define OFFSET_FAULT_BASELINE_MAX      650  // ppm — daily min must be below this
+
+/* Number of consecutive 5-second cycles the fault condition
+ * must be sustained before a soft reset is sent.
+ * 6 cycles = 30 seconds: enough to rule out a real breath
+ * spike (which typically peaks and falls within 15 s). */
+#define OFFSET_FAULT_CONFIRM_CYCLES      6  // cycles before reset is triggered
+
+/* Maximum number of soft resets to attempt before
+ * escalating to ESP.restart(). If the sensor does not
+ * recover after this many resets it may need a true
+ * power cycle (unplug/replug the sensor 5V supply). */
+#define OFFSET_FAULT_MAX_RESETS          3  // soft resets before ESP restart
+
+int  offsetFaultCounter   = 0;     // consecutive cycles above threshold
+int  offsetResetCount     = 0;     // total soft resets sent this session
+bool offsetRecoveryActive = false; // true while waiting for post-reset stabilization
+unsigned long offsetResetTime = 0; // millis() when last soft reset was sent
+
+/* ============================================================
  * WIFI CONNECT
  * ============================================================ */
 
@@ -1308,6 +1399,216 @@ void setABC(bool enable)
  * value (including Blynk sync-on-connect) is ignored.
  *
  * ============================================================ */
+
+/* ============================================================
+ * [NEW v6.13] SEND SOFT RESET COMMAND VIA UART
+ * ============================================================
+ *
+ * Sends the MH-Z19 soft-reset command which restarts the
+ * sensor internal MCU and clears its baseline offset state
+ * without cutting power to the sensor.
+ *
+ * The sensor goes silent for approximately 3-5 seconds after
+ * receiving this command, then resumes normal PWM and UART
+ * output. During this period readCO2PWM() will return -1
+ * (timeout) which is handled gracefully by the existing
+ * SENSOR_RECOVERY path.
+ *
+ * Command bytes — checksum 0x72:
+ *   0xFF 0x01 0x8D 0x00 0x00 0x00 0x00 0x00 0x72
+ *   sum = 0x01 + 0x8D = 0x8E
+ *   ~0x8E + 1 = 0x71 + 1 = 0x72  ok
+ *
+ * The sensor does NOT send a response to this command.
+ *
+ * After sending this command the caller also resets all
+ * firmware state variables so the protection layers
+ * start fresh with clean buffers and counters.
+ *
+ * ============================================================ */
+
+void sendSoftResetUART()
+{
+  byte cmd[9] = {
+    0xFF, 0x01, 0x8D,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x72
+  };
+
+  /* Flush any stale bytes before sending */
+  while (uartSerial.available())
+    uartSerial.read();
+
+  uartSerial.write(cmd, 9);
+
+  offsetResetCount++;
+  offsetResetTime      = millis();
+  offsetRecoveryActive = true;
+  offsetFaultCounter   = 0;
+
+  diagState = "OFFSET_RECOVERY";
+
+  Serial.print("[OFFSET] soft reset sent (reset #");
+  Serial.print(offsetResetCount);
+  Serial.println(")");
+
+  /* --------------------------------------------------------
+   * Reset all firmware state variables so the protection
+   * layers start fresh after the sensor recovers.
+   * This mirrors what a device restart achieves for the
+   * firmware side, without actually rebooting the ESP.
+   * -------------------------------------------------------- */
+
+  smoothPPM                   = 400.0f;
+  lastValidPPM                = 400.0f;
+  ppm5                        = 400.0f;
+  firstStepDone               = false;
+  hadRecentInvalidMeasurement = false;
+  rateRejectCounter           = 0;
+  controlledRecoveryActive    = false;
+  consecutiveFaults           = 0;
+  consecutiveGood             = 0;
+  faultLatched                = false;
+  medianConsensusCount        = 0;
+  sensorStuck                 = false;
+  sensorStuckLatched          = false;
+  stuckCounter                = 0;
+  prevRawForStuck             = -1;
+  lastComputedMedian          = -1;
+  medianReady                 = false;
+  medianFillCount             = 0;
+  medianIdx                   = 0;
+
+  /* Re-initialize median buffer to safe baseline */
+  for (int i = 0; i < MEDIAN_WINDOW; i++)
+    medianBuffer[i] = 400;
+
+  /* Reset watchdog so it does not fire during recovery */
+  lastValidReadingTime = millis();
+
+  Serial.println("[OFFSET] firmware state reset for clean recovery");
+}
+
+/* ============================================================
+ * [NEW v6.13] CHECK OFFSET FAULT CONDITION
+ * ============================================================
+ *
+ * Called every cycle from sendUptime() after UART reading
+ * is available. Evaluates whether all fault criteria are
+ * met and triggers sendSoftResetUART() when confirmed.
+ *
+ * Parameters:
+ *   pwmPPM  — current smoothPPM (PWM-derived, smoothed)
+ *   uartPPM — current lastUartPPM (-1 if UART not connected)
+ *
+ * ============================================================ */
+
+void checkOffsetFault(float pwmPPM, long uartPPM)
+{
+  /* UART must be connected and returning a valid reading.
+   * Without UART we cannot distinguish offset fault from
+   * real high CO2, so detection is skipped. */
+  if (uartPPM < 0)
+    return;
+
+  /* Skip during post-reset stabilization period (10 s).
+   * The sensor needs time to warm up after soft reset
+   * before its output is meaningful again. */
+  if (offsetRecoveryActive)
+  {
+    if ((millis() - offsetResetTime) < 10000UL)
+    {
+      /* Still in stabilization window — do nothing */
+      return;
+    }
+    else
+    {
+      /* Stabilization complete */
+      offsetRecoveryActive = false;
+
+      Serial.println("[OFFSET] post-reset stabilization complete");
+    }
+  }
+
+  /* --------------------------------------------------------
+   * DETECTION CRITERIA:
+   *
+   * 1. Both PWM and UART are above the threshold.
+   *    If only one channel is high, it may be a single-
+   *    channel measurement artifact rather than a sensor
+   *    internal fault.
+   *
+   * 2. Daily minimum was low — room was genuinely clean
+   *    earlier today. This rules out sustained real high
+   *    CO2 from poor ventilation or other real sources.
+   *
+   * 3. Fault has persisted for enough consecutive cycles
+   *    to rule out a real transient spike (breath test etc).
+   * -------------------------------------------------------- */
+
+  bool bothChannelsHigh =
+      (pwmPPM  >= (float)OFFSET_FAULT_PPM_THRESHOLD) &&
+      (uartPPM >= (long)OFFSET_FAULT_PPM_THRESHOLD);
+
+  bool baselineWasLow =
+      (dailyMinPPM < (float)OFFSET_FAULT_BASELINE_MAX);
+
+  if (bothChannelsHigh && baselineWasLow)
+  {
+    offsetFaultCounter++;
+
+    Serial.print("[OFFSET] fault counter=");
+    Serial.print(offsetFaultCounter);
+    Serial.print("/");
+    Serial.println(OFFSET_FAULT_CONFIRM_CYCLES);
+
+    if (offsetFaultCounter >= OFFSET_FAULT_CONFIRM_CYCLES)
+    {
+      diagState = "OFFSET_FAULT";
+
+      Serial.print("[OFFSET] fault confirmed — PWM=");
+      Serial.print((long)pwmPPM);
+      Serial.print(" UART=");
+      Serial.print(uartPPM);
+      Serial.print(" dailyMin=");
+      Serial.println((long)dailyMinPPM);
+
+      if (offsetResetCount < OFFSET_FAULT_MAX_RESETS)
+      {
+        /* Attempt soft reset via UART */
+        sendSoftResetUART();
+      }
+      else
+      {
+        /* Soft resets exhausted — escalate to ESP restart.
+         * The sensor stays powered; only the ESP reboots.
+         * If the sensor itself needs a true power cycle,
+         * that requires manual intervention. */
+        Serial.print("[OFFSET] max resets (");
+        Serial.print(OFFSET_FAULT_MAX_RESETS);
+        Serial.println(") reached — escalating to ESP.restart()");
+
+        Serial.flush();
+        delay(200);
+        ESP.restart();
+      }
+    }
+  }
+  else
+  {
+    /* Condition not met or one channel is back to normal:
+     * reset the counter so fresh consecutive cycles are
+     * required before the next reset is triggered. */
+    if (offsetFaultCounter > 0)
+    {
+      Serial.print("[OFFSET] counter reset (was ");
+      Serial.print(offsetFaultCounter);
+      Serial.println(")");
+
+      offsetFaultCounter = 0;
+    }
+  }
+}
 
 BLYNK_WRITE(V20)
 {
@@ -2240,6 +2541,17 @@ void sendUptime()
     Serial.println(lastUartPPM - (long)smoothPPM);
   }
 
+  /* --------------------------------------------------------
+   * [NEW v6.13] LAYER 12 — Offset fault detection.
+   *
+   * Called after UART read so both PWM (smoothPPM) and
+   * UART (lastUartPPM) values are available for comparison.
+   * checkOffsetFault() returns immediately if UART is not
+   * connected (lastUartPPM == -1) so this is safe even
+   * when running without UART wired.
+   * -------------------------------------------------------- */
+  checkOffsetFault(smoothPPM, lastUartPPM);
+
   Blynk.virtualWrite(21, abcEnabled ? 1 : 0);
 
   if (counterLoos > 5)
@@ -2355,6 +2667,17 @@ void sendUptime()
 
   Serial.print("UABC : ");           // ABC enable state
   Serial.println(abcEnabled ? "ON" : "OFF");
+
+  /* [NEW v6.13] Offset fault diagnostic fields */
+
+  Serial.print("OFST : ");           // offset fault cycle counter / total resets sent
+  Serial.print(offsetFaultCounter);
+  Serial.print(" cycles / ");
+  Serial.print(offsetResetCount);
+  Serial.print(" resets");
+  if (offsetRecoveryActive)
+    Serial.print(" [RECOVERING]");
+  Serial.println();
 
   Serial.println("===================================");
 
