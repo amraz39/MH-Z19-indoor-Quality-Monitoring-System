@@ -546,6 +546,9 @@ The current dashboard implementation additionally includes:
 * CSV export of downloaded Blynk history
 * Startup diagnostics and connectivity testing
 * Detailed engineering TXT logging for HTTP requests and parsing operations
+* Button to perform CO2 sensor's zero calibration (in fresh air)
+* Button to perform CO2 sensor's reset
+* Button to enable/disablle ABC (automatic calibration every 24 hours) - persistent with check
 
 ### Graph Interaction
 
@@ -746,6 +749,7 @@ The firmware reads CO2 via SoftwareSerial UART in parallel with the PWM path.
 | V13 reporting       | UART ppm written to Blynk only on valid read                         |
 | Zero calibration    | Triggered remotely via V20; sends 9-byte UART command to sensor      |
 | ABC control         | Enabled/disabled remotely via V21; state persisted across sessions   |
+| Reset               | Triggered remotely via V22; sends 9-byte UART command to sensor      |
 | Auto-detection      | Dashboard detects UART absent (V13 = None) and disables buttons      |
 
 ## Industrial Logging Philosophy

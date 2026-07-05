@@ -1,5 +1,5 @@
 # Blynk CO2 Dashboard for Windows PC
-# v2.5 — WiFi RSSI signal strength display in bottom bar (V14)
+# v2.6 — Reset CO2 sensor + WiFi RSSI signal strength display in bottom bar (V14)
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -68,6 +68,7 @@
  - UART CO2 cross-check vs PWM with delta warning
  - ABC preference persistence — if user set ABC OFF, dashboard
    automatically re-enforces OFF if board reboots and resets to ON
+ - Reset CO2 sensor button
  - All HTTP fetches run in background thread — UI never freezes
 
 ============================================================
@@ -104,6 +105,7 @@
  V20 = zero calibration trigger (write 1 — requires INO support)
  V21 = ABC state  (read: 1=enabled 0=disabled;
                    write: 1=enable 0=disable — requires INO support)
+ V22 = reset CO2 sensor (write 1 — requires INO support)
 
 ============================================================
  INO REQUIREMENTS FOR NEW FEATURES
@@ -255,8 +257,9 @@ CO2_COLOR_DEFAULT  = "white"
 
 V_CO2_UART  = 13   # UART CO2 reading sent each cycle by INO
 V_WIFI_RSSI = 14   # WiFi RSSI in dBm         [NEW v6.12]
-V_ZERO_CAL  = 20   # write 1 to trigger zero calibration
-V_ABC_STATE = 21   # read 1=enabled/0=disabled; write to toggle
+V_ZERO_CAL     = 20   # write 1 to trigger zero calibration
+V_ABC_STATE    = 21   # read 1=enabled/0=disabled; write to toggle
+V_SENSOR_RESET = 22   # write 1 to trigger manual sensor soft reset  [NEW v6.14]
 
 # ============================================================
 # UART CROSS-CHECK THRESHOLD
@@ -1105,6 +1108,17 @@ def _apply_abc_button_style():
 
 abc_user_preference = None    # populated by load_abc_preference() at startup
 
+# Timestamp of the last successful ABC preference enforcement.
+# Used as a cooldown so repeated writes are not sent on every
+# cycle while waiting for the board to acknowledge the write.
+# A value of 0.0 means no enforcement has been sent yet.
+_abc_last_enforce_time = 0.0    # seconds since epoch (time.time())
+
+# Minimum interval between enforcement writes in seconds.
+# 120 s gives the board two full 60-second refresh cycles to
+# acknowledge the write before another attempt is made.
+ABC_ENFORCE_COOLDOWN_S = 120
+
 
 def load_abc_preference():
     """
@@ -1192,39 +1206,99 @@ def refresh_abc_state():
     #
     # ============================================================
 
+    # ============================================================
+    # ABC PREFERENCE ENFORCEMENT WITH COOLDOWN
+    # ============================================================
+    #
+    # A cooldown (ABC_ENFORCE_COOLDOWN_S = 120 s) prevents
+    # repeated write attempts while the board is still processing
+    # the previous enforcement write. Without the cooldown, each
+    # refresh cycle re-reads a stale V21 value and sends another
+    # write before the board has acknowledged the first one.
+    #
+    # The label_click_info is updated every call:
+    #   - Normal (board matches preference): green confirmation
+    #   - Enforcement sent: yellow warning with action taken
+    #   - Enforcement failed: red error
+    #   - No preference set: grey neutral text
+    # ============================================================
+
+    import time as _time   # local alias — time already imported globally
+
     if (
         abc_user_preference is not None and
         abc_state != "unknown" and
         abc_state != abc_user_preference
     ):
-        enforce_value = 0 if abc_user_preference == "disabled" else 1
+        now = _time.time()
 
-        log_txt(
-            f"ABC PREFERENCE MISMATCH: board={abc_state} "
-            f"preference={abc_user_preference} — "
-            f"re-enforcing preference (writing {enforce_value} to V{V_ABC_STATE})"
-        )
+        if (now - _abc_last_enforce_time) >= ABC_ENFORCE_COOLDOWN_S:
 
-        ok = write_virtual_pin(V_ABC_STATE, enforce_value)
-
-        if ok:
-            # Update local state to match what we just enforced
-            abc_state = abc_user_preference
+            enforce_value = 0 if abc_user_preference == "disabled" else 1
 
             log_txt(
-                f"ABC preference re-enforced successfully: {abc_user_preference}"
+                f"ABC PREFERENCE MISMATCH: board={abc_state} "
+                f"preference={abc_user_preference} — "
+                f"re-enforcing preference (writing {enforce_value} to V{V_ABC_STATE})"
             )
 
-            # Update the info label so the user sees what happened
+            ok = write_virtual_pin(V_ABC_STATE, enforce_value)
+
+            if ok:
+                # Update local state to match what we just enforced
+                abc_state = abc_user_preference
+
+                _abc_last_enforce_time = now
+
+                log_txt(
+                    f"ABC preference re-enforced successfully: {abc_user_preference}"
+                )
+
+                # Show enforcement message so user sees what happened
+                label_click_info.configure(
+                    text=(
+                        f"⚠  ABC re-enforced to {abc_user_preference.upper()} "
+                        f"after board reset"
+                    ),
+                    text_color="#ffd700"
+                )
+            else:
+                log_txt("ABC preference re-enforcement FAILED — will retry next cycle")
+
+                label_click_info.configure(
+                    text="⚠  ABC re-enforcement FAILED — check server connection",
+                    text_color="#ff4444"
+                )
+        else:
+            # Still within cooldown — show pending message
+            remaining = int(ABC_ENFORCE_COOLDOWN_S - (_time.time() - _abc_last_enforce_time))
+            log_txt(
+                f"ABC enforcement cooldown active — {remaining}s remaining"
+            )
+
             label_click_info.configure(
                 text=(
-                    f"⚠ ABC re-enforced to {abc_user_preference.upper()} "
-                    f"after board reset"
+                    f"⚠  ABC re-enforcement pending "
+                    f"({abc_user_preference.upper()}) — "
+                    f"waiting for board confirmation..."
                 ),
                 text_color="#ffd700"
             )
-        else:
-            log_txt("ABC preference re-enforcement FAILED — will retry next cycle")
+
+    elif abc_user_preference is not None and abc_state != "unknown":
+        # Board state matches preference — show confirmation
+        color = "#00cc44" if abc_state == "disabled" else "#94a3b8"
+        label_click_info.configure(
+            text=f"✓  ABC is {abc_state.upper()} (matches preference)",
+            text_color=color
+        )
+
+    else:
+        # No preference set or state unknown — show neutral text
+        label_click_info.configure(
+            text=f"ABC state: {abc_state.upper() if abc_state else '—'}",
+            text_color="#475569"
+        )
 
     _apply_abc_button_style()
 
@@ -1270,6 +1344,65 @@ def toggle_abc():
         log_txt("ABC toggle: write FAILED")
         label_click_info.configure(
             text="ABC toggle failed — check server connection",
+            text_color="#ff4444"
+        )
+
+
+def trigger_sensor_reset():
+    """
+    Trigger a manual MH-Z19 soft reset via V22.
+
+    Shows a confirmation dialog before sending to prevent
+    accidental resets during normal operation.
+
+    The soft reset command restarts the sensor internal MCU
+    without cutting power. The sensor goes silent for ~3-5
+    seconds then resumes normal output. All firmware state
+    on the ESP8266 is also reset (smoother, median buffer,
+    stuck counter, fault latch) so the protection layers
+    start fresh after recovery.
+
+    Use when:
+      - Sensor reads high but room air is clearly clean
+      - Offset fault was not caught automatically by LAYER 12
+      - Sensor behaves erratically and a power cycle is not
+        possible (remote / unattended installation)
+
+    Requires matching BLYNK_WRITE(V22) handler in the INO
+    (added in v6.14).
+    """
+
+    confirmed = messagebox.askyesno(
+        title="Manual Sensor Reset",
+        message=(
+            "Are you sure you want to send a soft reset to the CO2 sensor?\n\n"
+            "This will:\n"
+            "  \u2022 Restart the sensor internal MCU (no power cut)\n"
+            "  \u2022 Reset all firmware protection state\n"
+            "  \u2022 Cause ~3-5 seconds of silence then normal resume\n\n"
+            "Use only when sensor reads incorrectly and\n"
+            "automatic recovery has not triggered."
+        )
+    )
+
+    if not confirmed:
+        log_txt("Manual sensor reset cancelled by user")
+        return
+
+    log_txt("Manual sensor reset: sending trigger to V22")
+
+    ok = write_virtual_pin(V_SENSOR_RESET, 1)
+
+    if ok:
+        log_txt("Manual sensor reset: trigger sent successfully")
+        label_click_info.configure(
+            text="\u27f3  Sensor soft reset sent \u2014 sensor will resume in ~5 s",
+            text_color="#22d3ee"
+        )
+    else:
+        log_txt("Manual sensor reset: write FAILED")
+        label_click_info.configure(
+            text="Manual sensor reset failed \u2014 check server connection",
             text_color="#ff4444"
         )
 
@@ -1344,6 +1477,13 @@ def _enable_uart_buttons():
     # ABC button state is set by refresh_abc_state()
     button_abc.configure(state="normal")
 
+    # Enable manual sensor reset button (requires UART)
+    button_sensor_reset.configure(
+        fg_color="#5f1e1e",
+        hover_color="#ff4444",
+        state="normal"
+    )
+
     # Immediately read actual ABC state from INO
     refresh_abc_state()
 
@@ -1354,7 +1494,13 @@ def _disable_uart_buttons():
     Called at startup and if UART signal is lost.
     """
 
-    log_txt("UART unavailable — disabling calibration buttons")
+    log_txt("UART unavailable — disabling calibration and reset buttons")
+
+    button_sensor_reset.configure(
+        fg_color="gray40",
+        hover_color="gray50",
+        state="disabled"
+    )
 
     button_zero_cal.configure(
         fg_color="gray40",
@@ -1536,7 +1682,7 @@ ctk.set_default_color_theme("blue")
 app = ctk.CTk()
 
 app.title("MH-Z19 CO2 Dashboard")
-app.geometry("1400x980")
+app.geometry("1350x980")
 
 # ── App-level dark background ──────────────────────────────────────────────────
 app.configure(fg_color="#090d16")
@@ -1895,6 +2041,34 @@ button_abc = ctk.CTkButton(
 )
 
 button_abc.pack(side="left", padx=8)
+
+# ============================================================
+# MANUAL SENSOR RESET BUTTON                      [NEW v6.14]
+# ============================================================
+#
+# Sends a soft reset command to the MH-Z19 sensor via V22.
+# Shows a confirmation dialog before sending.
+#
+# STARTS DISABLED (gray) until UART signal is confirmed on
+# V13 — the soft reset is sent over UART by the INO so UART
+# must be physically connected for it to work.
+#
+# Requires matching BLYNK_WRITE(V22) handler in the INO.
+#
+# ============================================================
+
+button_sensor_reset = ctk.CTkButton(
+    frame_bottom,
+    text="Reset Sensor",
+    fg_color="gray40",
+    hover_color="gray50",
+    state="disabled",
+    command=trigger_sensor_reset,
+    font=("Segoe UI", 12),
+    corner_radius=8
+)
+
+button_sensor_reset.pack(side="left", padx=8)
 
 
 # ============================================================

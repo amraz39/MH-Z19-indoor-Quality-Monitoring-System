@@ -30,6 +30,7 @@
  * v. 6/14/2026 by AM  (v6.9 — logic audit and bug fixes, see list below)
  * v. 6/28/2026 by AM  (v6.12 — WiFi RSSI reported on V14)
  * v. 7/03/2026 by AM  (v6.13 — LAYER 12: UART sensor offset auto-recovery)
+ * v. 7/05/2026 by AM  (v6.14 - restarts the STM32F051 MCU inside the CO2 sensor via BLYNK_WRITE(V22) 0x8D
  *
  * ============================================================
  * v6.9 BUG FIXES AND IMPROVEMENTS
@@ -586,6 +587,18 @@
  *            BLYNK_WRITE handler: write 1 to enable,
  *            0 to disable ABC.
  *            Allows toggling ABC remotely via dashboard.
+ *
+ *   V22  = manual sensor soft reset    [NEW v6.14]
+ *            BLYNK_WRITE handler.
+ *            Dashboard writes 1 after user confirms dialog.
+ *            Calls sendSoftResetUART() to reset sensor
+ *            internal MCU state without cutting power.
+ *            Use when sensor reads high but room is clean,
+ *            or after offset fault that did not self-recover
+ *            via automatic LAYER 12 logic.
+ *            Sensor goes silent ~3-5 s then resumes.
+ *            Writes 0 back to V22 to prevent re-trigger
+ *            on next Blynk sync.
  *
  * ============================================================
  * [NEW v6.8] ADDITIONAL DIAGNOSTIC STATE
@@ -1649,6 +1662,54 @@ BLYNK_WRITE(V21)
   {
     Serial.println("[BLYNK] V21: ABC disable requested by dashboard");
     setABC(false);
+  }
+}
+
+/* ============================================================
+ * [NEW v6.14] BLYNK_WRITE(V22) — MANUAL SENSOR SOFT RESET
+ * ============================================================
+ *
+ * Invoked when the dashboard user clicks the Manual Reset
+ * button and confirms the action dialog.
+ *
+ * Calls sendSoftResetUART() which:
+ *   - Sends the MH-Z19 soft-reset UART command
+ *     (0xFF 0x01 0x8D 0x00 0x00 0x00 0x00 0x00 0x72)
+ *   - Resets all firmware state variables (smoother,
+ *     median buffer, stuck counter, fault latch) so
+ *     protection layers start fresh after recovery
+ *   - Sets diagState to "OFFSET_RECOVERY"
+ *
+ * Only acts on value == 1; any other value (including
+ * Blynk sync-on-connect) is ignored to prevent
+ * accidental resets on reconnect.
+ *
+ * After triggering, writes 0 back to V22 so the button
+ * does not stay latched at 1 and re-trigger on next
+ * Blynk sync. The reset is a momentary trigger, not
+ * a toggle.
+ *
+ * The manual reset is independent of automatic LAYER 12
+ * offset fault detection — allows user to force a reset
+ * at any time without waiting for the detection threshold.
+ *
+ * ============================================================ */
+
+BLYNK_WRITE(V22)
+{
+  int val = param.asInt();
+
+  if (val == 1)
+  {
+    Serial.println("[BLYNK] V22: manual sensor soft reset requested by dashboard");
+
+    sendSoftResetUART();
+
+    /* Write 0 back to V22 so the button does not stay
+     * latched at 1 and accidentally re-trigger on the
+     * next Blynk sync. The dashboard button is a
+     * momentary trigger, not a toggle. */
+    Blynk.virtualWrite(22, 0);
   }
 }
 
