@@ -1,5 +1,6 @@
 # Blynk CO2 Dashboard for Windows PC
-# v2.6 — Reset CO2 sensor + WiFi RSSI signal strength display in bottom bar (V14)
+# v2.7 — Reset CO2 sensor + WiFi RSSI signal strength display in bottom bar (V14) + 
+#        add few more variables into secret.h
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -21,7 +22,7 @@
 # BLYNK_SERVER = "192.168.xx.xx" #<-- RPi5 (x9) and Rpi5 new (x4)
 # if your Raspberry Pi IP changes.
 
-# Port is automatically set to: 8080
+# Port is set to based on: 8084 via secret.h file (new)
 
 """
 ============================================================
@@ -115,7 +116,9 @@
 
    BLYNK_WRITE(V20)  — on value 1: trigger zero calibration
    BLYNK_WRITE(V21)  — on value 1: enable ABC
-                        on value 0: disable ABC
+                       on value 0: disable ABC
+   BLYNK_WRITE(V22)  — on value 1: reset CO2 sensor
+                     — on value 0: do nothing
 
  The following must be written each cycle from the INO:
 
@@ -180,13 +183,61 @@ def load_IP_server():
 BLYNK_SERVER = load_IP_server()
 
 # ============================================================
+# READ PORT OF BLYNK SERVER FROM secrets.h
+# ============================================================
+
+def load_port_server():
+    """
+    Extract BLYNK_PORT from secrets.h
+    """
+
+    if not os.path.exists("secrets.h"):
+        raise FileNotFoundError("secrets.h not found")
+
+    with open("secrets.h", "r", encoding="utf-8") as f:
+        content = f.read()
+
+    match = re.search(r'BLYNK_PORT\s+"([^"]+)"', content)
+
+    if not match:
+        raise ValueError("BLYNK_PORT not found in secrets.h")
+
+    return match.group(1)
+
+BLYNK_PORT = load_port_server()
+
+# ============================================================
+# READ UPDATE_INTERVAL_MS FROM secrets.h
+# ============================================================
+
+def load_update_interval():
+    """
+    Extract UPDATE_INTERVAL_MS from secrets.h
+    """
+
+    if not os.path.exists("secrets.h"):
+        raise FileNotFoundError("secrets.h not found")
+
+    with open("secrets.h", "r", encoding="utf-8") as f:
+        content = f.read()
+
+    match = re.search(r'UPDATE_INTERVAL_MS\s+"([^"]+)"', content)
+
+    if not match:
+        raise ValueError("UPDATE_INTERVAL_MS not found in secrets.h")
+
+    return match.group(1)
+
+UPDATE_INTERVAL_MS = load_update_interval()
+
+# ============================================================
 # CONFIGURATION
 # ============================================================
 
 #BLYNK_SERVER = "192.xxx.xx.xx"
-BLYNK_PORT   = 8084
+#BLYNK_PORT   = 8084
 
-UPDATE_INTERVAL_MS = 5000
+#UPDATE_INTERVAL_MS = 5000
 
 CSV_LOG_FILE = "co2_log.csv"
 TXT_LOG_FILE = "engineering_log.txt"

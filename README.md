@@ -192,6 +192,7 @@ The firmware appends diagnostic states to Slovak status messages.
 | V13         | Write          | CO2 ppm (UART raw, cross-check) — written only on success  |
 | V20         | Read (handler) | Zero calibration trigger — write 1 to trigger              |
 | V21         | Read+Write     | ABC state — written each cycle; write 1=enable / 0=disable |
+| V22         | Write          | Soft reset — written to initial MH-Z19 soft reset that mimics off-on (clears memory and resets MCU); write 1=enable / 0=disable |
 
 > **V13 absence detection:** If the UART wires are not connected, V13 is never
 > written. The dashboard reads `None` for V13 and keeps calibration buttons
@@ -363,6 +364,8 @@ Example:
 #define WIFI_PASS    "YourPassword"
 #define BLYNK_AUTH   "YourAuthToken"
 #define BLYNK_SERVER "xxx.xxx.xxx.xxx"
+#define BLYNK_PORT   "808x"
+#define UPDATE_INTERVAL_MS "5000"
 ```
 
 ---
@@ -800,7 +803,7 @@ The firmware prints a diagnostic block every 5 seconds over USB serial (115200 b
 Dashboard (Windows EXE file):
 
 ```text
-v2.6
+v2.7
 ```
 
 SensorValue6.ino (Firmware for Arduino IDE):
