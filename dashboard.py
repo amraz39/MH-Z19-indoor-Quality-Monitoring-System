@@ -1,6 +1,6 @@
 # Blynk CO2 Dashboard for Windows PC
-# v2.7 — Reset CO2 sensor + WiFi RSSI signal strength display in bottom bar (V14) + 
-#        add few more variables into secret.h
+# v2.8 — Reset CO2 sensor + WiFi RSSI signal strength display in bottom bar (V14) + 
+#        add few more variables into secret.h + Fix to ABC button
 
 # This Python application connects to your local Blynk server running on Raspberry Pi 5 and displays:
 
@@ -1082,8 +1082,8 @@ abc_state = "unknown"
 # Set to ABC_REFRESH_EVERY at startup so UART + ABC state is
 # checked immediately on the very first fetch cycle.
 
-abc_refresh_counter = 0
 ABC_REFRESH_EVERY   = 12
+abc_refresh_counter = ABC_REFRESH_EVERY
 
 # ============================================================
 # UART AVAILABILITY FLAG
@@ -1224,7 +1224,7 @@ def refresh_abc_state():
     to V21 and logs the enforcement event.
     """
 
-    global abc_state, abc_user_preference
+    global abc_state, abc_user_preference, _abc_last_enforce_time
 
     val = read_virtual_pin(V_ABC_STATE)
 
