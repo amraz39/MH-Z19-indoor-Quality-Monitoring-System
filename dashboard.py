@@ -308,6 +308,11 @@ CO2_COLOR_DEFAULT  = "white"
 
 V_CO2_UART  = 13   # UART CO2 reading sent each cycle by INO
 V_WIFI_RSSI = 14   # WiFi RSSI in dBm         [NEW v6.12]
+   # IMPORTANT: ESP8266 firmware must execute
+   #   Blynk.virtualWrite(V_WIFI_RSSI, WiFi.RSSI());
+   # periodically (e.g. every 5 s). The dashboard cannot generate
+   # a new RSSI value if V14 is never updated by the firmware.
+
 V_ZERO_CAL     = 20   # write 1 to trigger zero calibration
 V_ABC_STATE    = 21   # read 1=enabled/0=disabled; write to toggle
 V_SENSOR_RESET = 22   # write 1 to trigger manual sensor soft reset  [NEW v6.14]
@@ -448,6 +453,74 @@ def read_virtual_pin(pin):
 
     except Exception as e:
         log_txt(f"PIN V{pin} ERROR: {e}")
+        return None
+
+# ============================================================
+# BLYNK HARDWARE CONNECTION STATUS
+# ============================================================
+#
+# IMPORTANT:
+# /get/Vx can return the last stored value even after the
+# ESP8266 has gone offline. Therefore a retained V14 value
+# such as -53 dBm must NOT be treated as a live WiFi reading.
+#
+# Legacy/local Blynk servers expose:
+#
+#   /AUTH_TOKEN/isHardwareConnected
+#
+# which reports the actual hardware connection state.
+#
+# Returns:
+#   True  = hardware currently connected
+#   False = hardware currently offline
+#   None  = endpoint unavailable / could not be checked
+#
+# If None is returned, the dashboard falls back to the
+# existing pin-based behaviour for compatibility.
+# ============================================================
+
+def check_hardware_connected():
+    """
+    Check the actual ESP8266 <-> Blynk server connection.
+
+    This is deliberately separate from read_virtual_pin()
+    because Blynk can retain the last V14 RSSI value after
+    the hardware disconnects.
+    """
+
+    url = (
+        f"http://{BLYNK_SERVER}:{BLYNK_PORT}/"
+        f"{AUTH_TOKEN}/isHardwareConnected"
+    )
+
+    try:
+        response = requests.get(url, timeout=3)
+
+        log_txt(
+            f"HTTP GET {url} -> {response.status_code} "
+            f"BODY={response.text.strip()}"
+        )
+
+        if response.status_code != 200:
+            return None
+
+        value = response.text.strip().strip('"').lower()
+
+        if value == "true":
+            return True
+
+        if value == "false":
+            return False
+
+        log_txt(
+            f"Unexpected isHardwareConnected response: {value}"
+        )
+        return None
+
+    except Exception as e:
+        log_txt(
+            f"isHardwareConnected ERROR: {e}"
+        )
         return None
 
 
@@ -1636,7 +1709,7 @@ def check_uart_availability(uart_val):
 # BACKGROUND FETCH — THREAD + QUEUE
 # ============================================================
 #
-# All HTTP reads (5 pins per cycle) run in a daemon thread so
+# All HTTP reads plus the hardware-status check run in a daemon thread so
 # the tkinter main loop is never blocked.
 #
 # Pattern:
@@ -1667,13 +1740,19 @@ def _fetch_worker():
     try:
         log_txt("Starting sensor acquisition cycle (background thread)")
 
+        # Check real hardware connectivity separately from pin values.
+        # Blynk may retain the last value of V14 after the ESP8266
+        # disconnects, so V14 alone is not a valid offline detector.
+        hardware_connected = check_hardware_connected()
+
         result = {
-            "temp":     read_virtual_pin(10),
-            "hum":      read_virtual_pin(11),
-            "co2":      read_virtual_pin(12),
-            "msg":      read_virtual_pin(3),
-            "co2_uart": read_virtual_pin(V_CO2_UART),
-            "rssi":     read_virtual_pin(V_WIFI_RSSI),   # [NEW v6.12] WiFi signal strength
+            "temp":               read_virtual_pin(10),
+            "hum":                read_virtual_pin(11),
+            "co2":                read_virtual_pin(12),
+            "msg":                read_virtual_pin(3),
+            "co2_uart":           read_virtual_pin(V_CO2_UART),
+            "rssi":               read_virtual_pin(V_WIFI_RSSI),
+            "hardware_connected": hardware_connected,
         }
 
         _result_queue.put(result)
@@ -2261,6 +2340,7 @@ def _process_result(result):
         msg      = result.get("msg")
         co2_uart = result.get("co2_uart")
         rssi     = result.get("rssi")   # [NEW v6.12] WiFi RSSI in dBm
+        hardware_connected = result.get("hardware_connected")
 
         if temp is not None:
             label_temp_value.configure(text=f"{float(temp):.1f} °C")
@@ -2278,11 +2358,21 @@ def _process_result(result):
         #
         # ====================================================
 
-        if rssi is not None:
+        # IMPORTANT:
+        # If the ESP8266 is offline, V14 can still contain the last
+        # stored RSSI (for example -53 dBm / 94%). Never display that
+        # retained value as live WiFi strength.
+        if hardware_connected is False:
+            label_wifi.configure(
+                text="📡  WiFi OFFLINE",
+                text_color="#ef4444"
+            )
+
+        elif rssi is not None:
             try:
-                rssi_dbm  = int(float(rssi))
-                quality   = rssi_to_quality(rssi_dbm)
-                icon      = rssi_icon(quality)
+                rssi_dbm = int(float(rssi))
+                quality  = rssi_to_quality(rssi_dbm)
+                icon     = rssi_icon(quality)
 
                 if quality >= 75:
                     wifi_color = "#22c55e"    # green — excellent
@@ -2298,9 +2388,15 @@ def _process_result(result):
                     text_color=wifi_color
                 )
             except (ValueError, TypeError):
-                label_wifi.configure(text="📡  WiFi: —", text_color="#475569")
+                label_wifi.configure(
+                    text="📡  WiFi: —",
+                    text_color="#475569"
+                )
         else:
-            label_wifi.configure(text="📡  WiFi: —", text_color="#475569")
+            label_wifi.configure(
+                text="📡  WiFi: —",
+                text_color="#475569"
+            )
 
         # ====================================================
         # CONNECTION STATUS UPDATE
@@ -2311,7 +2407,11 @@ def _process_result(result):
         #
         # ====================================================
 
-        if co2 is not None:
+        # Prefer the real Blynk hardware state. If the endpoint is not
+        # available on an older server, fall back to the old CO2 test.
+        if hardware_connected is True or (
+            hardware_connected is None and co2 is not None
+        ):
             label_status.configure(
                 text="⬤  CONNECTED",
                 text_color="#00cc44"
