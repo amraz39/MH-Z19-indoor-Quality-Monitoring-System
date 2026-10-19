@@ -588,6 +588,11 @@
  *            0 to disable ABC.
  *            Allows toggling ABC remotely via dashboard.
  *
+ *   V23  = telemetry heartbeat counter  [NEW]
+ *            Incremented and published once per second by its own timer.
+ *            Dashboard watches the sequence advance to distinguish
+ *            a live ESP8266 from cached identical sensor values.
+ *
  *   V22  = manual sensor soft reset    [NEW v6.14]
  *            BLYNK_WRITE handler.
  *            Dashboard writes 1 after user confirms dialog.
@@ -781,6 +786,10 @@ bool abcEnabled = true;         // [NEW v6.8] true = ABC on (MH-Z19 factory defa
  * ============================================================ */
 
 long lastUartPPM = -1;          // [NEW v6.8] initialised to -1 (not yet read)
+
+/* Advances once per second independently of the five-second sensor cycle.
+ * Its change provides unambiguous live ESP8266/Blynk delivery evidence. */
+unsigned long telemetryHeartbeat = 0;
 
 /* ============================================================
  * DIAGNOSTIC STATE
@@ -1965,6 +1974,17 @@ float getAdaptiveAlpha(float delta)
  * SENSOR UPDATE LOOP
  * ============================================================ */
 
+void sendTelemetryHeartbeat()
+{
+  telemetryHeartbeat++;
+
+  if (Blynk.connected())
+  {
+    Blynk.virtualWrite(23, telemetryHeartbeat);
+  }
+}
+
+
 void sendUptime()
 {
   if (WiFi.status() != WL_CONNECTED)
@@ -2857,6 +2877,7 @@ void setup()
   for (int i = 0; i < MEDIAN_WINDOW; i++)
     medianBuffer[i] = 400;
 
+  timer.setInterval(1000L, sendTelemetryHeartbeat);
   timer.setInterval(5000L, sendUptime);
 
   Serial.println("System ready");

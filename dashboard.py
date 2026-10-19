@@ -143,6 +143,7 @@ import os
 import re
 import queue
 import threading
+import time
 import requests
 import csv
 import pandas as pd
@@ -230,6 +231,13 @@ def load_update_interval():
 
 UPDATE_INTERVAL_MS = load_update_interval()
 
+# Connection health is checked independently from the slower sensor-data poll.
+# This keeps status responsive even when one or more V-pin reads time out.
+HEALTH_POLL_MS = 1000
+HEALTH_HTTP_TIMEOUT_S = 1.5
+DATA_HTTP_TIMEOUT_S = 2.5
+HEARTBEAT_TIMEOUT_S = 5.5  # allows unchanged cooperative PWM reads to finish
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -316,6 +324,7 @@ V_WIFI_RSSI = 14   # WiFi RSSI in dBm         [NEW v6.12]
 V_ZERO_CAL     = 20   # write 1 to trigger zero calibration
 V_ABC_STATE    = 21   # read 1=enabled/0=disabled; write to toggle
 V_SENSOR_RESET = 22   # write 1 to trigger manual sensor soft reset  [NEW v6.14]
+V_TELEMETRY_HEARTBEAT = 23  # increments independently every second
 
 # ============================================================
 # UART CROSS-CHECK THRESHOLD
@@ -417,14 +426,25 @@ if not os.path.exists(CSV_LOG_FILE):
 # BLYNK API
 # ============================================================
 
+# The legacy local Blynk server behaves best with one request at a time. A
+# persistent session keeps the original sequential behavior while avoiding a
+# new TCP connection for every pin. The lock also prevents health checks,
+# control writes, and history downloads from colliding with the data poll.
+_blynk_session = requests.Session()
+_blynk_http_lock = threading.Lock()
 
-def read_virtual_pin(pin):
-    """
-    Read value from local Blynk server.
 
-    Older Blynk local servers typically use:
+def _blynk_get(url, timeout):
+    with _blynk_http_lock:
+        return _blynk_session.get(url, timeout=timeout)
 
-      /AUTH_TOKEN/get/Vx
+
+def read_virtual_pin(pin, timeout=DATA_HTTP_TIMEOUT_S, log_http=True):
+    """Read one virtual pin from the local Blynk server.
+
+    ``log_http=False`` is used by the periodic poll. Rewriting the complete
+    prepend-only engineering log for every response previously dominated
+    acquisition time as that file grew.
     """
 
     url = (
@@ -433,28 +453,23 @@ def read_virtual_pin(pin):
     )
 
     try:
-        response = requests.get(url, timeout=5)
-
-        log_txt(f"HTTP GET {url} -> {response.status_code}")
-
+        response = _blynk_get(url, timeout)
+        if log_http:
+            log_txt(f"HTTP GET {url} -> {response.status_code}")
         if response.status_code != 200:
             return None
 
         text = response.text.strip()
+        if log_http:
+            log_txt(f"PIN V{pin} RAW RESPONSE: {text}")
 
-        log_txt(f"PIN V{pin} RAW RESPONSE: {text}")
-
-        # Old Blynk servers return values like:
-        # ["23.5"]
-
-        cleaned = text.replace('["', '').replace('"]', '')
-
-        return cleaned
+        # Old Blynk servers return one-item arrays such as ["23.5"].
+        return text.replace('["', '').replace('"]', '')
 
     except Exception as e:
-        log_txt(f"PIN V{pin} ERROR: {e}")
+        if log_http:
+            log_txt(f"PIN V{pin} ERROR: {e}")
         return None
-
 # ============================================================
 # BLYNK HARDWARE CONNECTION STATUS
 # ============================================================
@@ -470,59 +485,86 @@ def read_virtual_pin(pin):
 #
 # which reports the actual hardware connection state.
 #
-# Returns:
-#   True  = hardware currently connected
-#   False = hardware currently offline
-#   None  = endpoint unavailable / could not be checked
+# The health check reports two independent values:
+#   server reachable       = True / False
+#   ESP8266 session state  = True / False / None (unknown)
 #
-# If None is returned, the dashboard falls back to the
-# existing pin-based behaviour for compatibility.
+# Cached virtual-pin values are never used as connection proof.
 # ============================================================
 
-def check_hardware_connected():
-    """
-    Check the actual ESP8266 <-> Blynk server connection.
+def _parse_blynk_bool(text):
+    """Parse plain, quoted, or one-item JSON-ish Blynk booleans."""
 
-    This is deliberately separate from read_virtual_pin()
-    because Blynk can retain the last V14 RSSI value after
-    the hardware disconnects.
+    if text is None:
+        return None
+
+    value = str(text).strip().strip('"').strip("'").strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1].strip().strip('"').strip("'").strip()
+
+    value = value.lower()
+    if value in ("true", "1", "yes", "online"):
+        return True
+    if value in ("false", "0", "no", "offline"):
+        return False
+    return None
+
+
+def check_connection_status():
+    """Return ``(server_reachable, esp8266_connected)``.
+
+    Any HTTP response proves that the server is reachable. A parsed boolean
+    from either supported endpoint reports the independent ESP8266 session
+    state. A missing device state never makes a cached V-pin value live.
+    """
+
+    urls = (
+        f"http://{BLYNK_SERVER}:{BLYNK_PORT}/"
+        f"{AUTH_TOKEN}/isHardwareConnected",
+        f"http://{BLYNK_SERVER}:{BLYNK_PORT}/external/api/"
+        f"isHardwareConnected?token={AUTH_TOKEN}",
+    )
+    server_reachable = False
+
+    for url in urls:
+        try:
+            response = _blynk_get(url, HEALTH_HTTP_TIMEOUT_S)
+            server_reachable = True
+            if response.status_code != 200:
+                continue
+
+            device_connected = _parse_blynk_bool(response.text)
+            if device_connected is not None:
+                return True, device_connected
+        except Exception:
+            # Try the alternative endpoint. Health failures appear in the UI
+            # and deliberately do not flood the engineering log every second.
+            continue
+
+    return server_reachable, None
+
+
+def _read_telemetry_heartbeat():
+    """Return ``(server_reachable, V23_value)`` without log flooding.
+
+    V23 is a sequence number, not a sensor value. The firmware increments it
+    once per second independently of sensor acquisition, so a change proves
+    that the ESP8266 is actively delivering data through Blynk even when every
+    physical measurement remains identical.
     """
 
     url = (
         f"http://{BLYNK_SERVER}:{BLYNK_PORT}/"
-        f"{AUTH_TOKEN}/isHardwareConnected"
+        f"{AUTH_TOKEN}/get/V{V_TELEMETRY_HEARTBEAT}"
     )
-
     try:
-        response = requests.get(url, timeout=3)
-
-        log_txt(
-            f"HTTP GET {url} -> {response.status_code} "
-            f"BODY={response.text.strip()}"
-        )
-
+        response = _blynk_get(url, HEALTH_HTTP_TIMEOUT_S)
         if response.status_code != 200:
-            return None
-
-        value = response.text.strip().strip('"').lower()
-
-        if value == "true":
-            return True
-
-        if value == "false":
-            return False
-
-        log_txt(
-            f"Unexpected isHardwareConnected response: {value}"
-        )
-        return None
-
-    except Exception as e:
-        log_txt(
-            f"isHardwareConnected ERROR: {e}"
-        )
-        return None
-
+            return True, None
+        value = response.text.strip().replace('["', '').replace('"]', '')
+        return True, value
+    except Exception:
+        return False, None
 
 # ============================================================
 # BLYNK API — WRITE VIRTUAL PIN
@@ -552,7 +594,7 @@ def write_virtual_pin(pin, value):
     )
 
     try:
-        response = requests.get(url, timeout=5)
+        response = _blynk_get(url, 5)
 
         log_txt(
             f"HTTP GET {url} -> {response.status_code}"
@@ -778,7 +820,7 @@ def download_blynk_history():
         )
         log_txt(f"Downloading history from: {url}")
         try:
-            response = requests.get(url, timeout=30)
+            response = _blynk_get(url, 30)
             log_txt(f"HTTP STATUS V{pin}: {response.status_code}")
             if response.status_code != 200:
                 log_txt(f"Failed to download V{pin}")
@@ -1167,13 +1209,9 @@ abc_refresh_counter = ABC_REFRESH_EVERY
 #   - the two UART wires are physically connected
 #   - the INO is writing UART CO2 data to V13
 #
-# While False:
-#   - Zero Calibration button is gray and disabled
-#   - ABC button is gray and disabled
-#   - UART cross-check label shows "UART: not wired"
-#
-# Checked at startup and every ~60 seconds.
-# Automatically enables buttons the moment UART is detected.
+# The flag controls UART diagnostics and ABC refresh only. Command buttons stay
+# available at all times; a failed command reports its own server/UART error.
+# Checked on every five-second data cycle.
 #
 # ============================================================
 
@@ -1590,7 +1628,7 @@ def _enable_uart_buttons():
     Also triggers an immediate ABC state refresh.
     """
 
-    log_txt("UART detected — enabling calibration buttons")
+    log_txt("UART detected — refreshing calibration control styles")
 
     button_zero_cal.configure(
         fg_color="#555500",
@@ -1612,98 +1650,44 @@ def _enable_uart_buttons():
     refresh_abc_state()
 
 
-def _disable_uart_buttons():
-    """
-    Gray out and disable Zero Calibration and ABC buttons.
-    Called at startup and if UART signal is lost.
-    """
-
-    log_txt("UART unavailable — disabling calibration and reset buttons")
-
-    button_sensor_reset.configure(
-        fg_color="gray40",
-        hover_color="gray50",
-        state="disabled"
-    )
-
-    button_zero_cal.configure(
-        fg_color="gray40",
-        hover_color="gray50",
-        state="disabled"
-    )
-
-    button_abc.configure(
-        text="ABC: ?",
-        fg_color="gray40",
-        hover_color="gray50",
-        state="disabled"
-    )
-
-    label_co2_uart.configure(
-        text="UART: not wired",
-        text_color="gray"
-    )
-
 
 # ============================================================
 # UART AVAILABILITY CHECK
 # ============================================================
 #
-# Reads V13 and checks whether the INO is writing valid
-# UART CO2 data. Enables or disables buttons accordingly.
+# V13 is retained by Blynk, so a numeric value can confirm that UART has
+# worked, but a missing HTTP result cannot prove that UART was disconnected.
+# Preserve the last confirmed state across transient server/read failures.
 #
-# Logic:
-#   V13 = None      → not wired, keep / set disabled
-#   V13 = number    → wired and working, enable buttons
-#
-# Transition events:
-#   unavailable → available : enable buttons, read ABC state
-#   available → unavailable : disable buttons
-#   no change               : reapply current state (idempotent)
-#
-# Called at startup and every ~60 seconds from update loop.
-#
-# In the threaded version, the V13 value is passed in from
-# the already-fetched result dict so no extra HTTP call is made.
-#
+# The check runs on every five-second data cycle. This gives a failed parallel
+# read an immediate retry instead of leaving controls disabled for 60 seconds.
 # ============================================================
 
+
 def check_uart_availability(uart_val):
-    """
-    Update uart_available and enable/disable buttons based on
-    a V13 value already fetched by the background thread.
+    """Enable UART controls after any valid V13 observation.
+
+    ``None`` and malformed responses are inconclusive and leave the previous
+    state untouched. Blynk does not expose whether an identical cached V13 was
+    freshly written, so disabling on a failed GET would be incorrect.
     """
 
     global uart_available
 
-    # Valid UART signal: V13 must return a parseable number
-    is_available = False
+    if uart_val is None:
+        return False
 
-    if uart_val is not None:
-        try:
-            float(uart_val)
-            is_available = True
-        except (ValueError, TypeError):
-            pass
+    try:
+        float(uart_val)
+    except (ValueError, TypeError):
+        return False
 
-    if is_available and not uart_available:
-        # New: UART just became available
+    if not uart_available:
         uart_available = True
         _enable_uart_buttons()
+        return True
 
-    elif not is_available and uart_available:
-        # New: UART just went away
-        uart_available = False
-        _disable_uart_buttons()
-
-    elif not is_available:
-        # Still unavailable — reapply disabled state (idempotent)
-        _disable_uart_buttons()
-
-    else:
-        # Still available — refresh ABC state only
-        refresh_abc_state()
-
+    return False
 
 # ============================================================
 # BACKGROUND FETCH — THREAD + QUEUE
@@ -1728,42 +1712,60 @@ def check_uart_availability(uart_val):
 _result_queue  = queue.Queue()
 _fetch_running = False    # guard: only one fetch thread at a time
 
+# These states are applied only by the Tk main thread from queued health data.
+_server_link_state = None
+_blynk_device_state = None
+_heartbeat_is_fresh = False
+_device_connected = None
+_last_server_seen = None
+_last_device_seen = None
+_last_heartbeat_value = None
+_last_heartbeat_activity = None
+_last_live_wallclock = None
+_health_failure_streak = 0
+
 
 def _fetch_worker():
-    """
-    Runs in a daemon thread.
-    Reads all Blynk pins then puts result dict into _result_queue.
+    """Read dashboard pins sequentially, matching the stable original flow.
+
+    The shared persistent session makes healthy cycles fast, while the shorter
+    timeout bounds delays without sending a burst of requests to the server.
     """
 
     global _fetch_running
 
+    pin_map = (
+        ("temp", 10),
+        ("hum", 11),
+        ("co2", 12),
+        ("msg", 3),
+        ("co2_uart", V_CO2_UART),
+        ("rssi", V_WIFI_RSSI),
+    )
+
     try:
-        log_txt("Starting sensor acquisition cycle (background thread)")
-
-        # Check real hardware connectivity separately from pin values.
-        # Blynk may retain the last value of V14 after the ESP8266
-        # disconnects, so V14 alone is not a valid offline detector.
-        hardware_connected = check_hardware_connected()
-
+        cycle_started = time.monotonic()
         result = {
-            "temp":               read_virtual_pin(10),
-            "hum":                read_virtual_pin(11),
-            "co2":                read_virtual_pin(12),
-            "msg":                read_virtual_pin(3),
-            "co2_uart":           read_virtual_pin(V_CO2_UART),
-            "rssi":               read_virtual_pin(V_WIFI_RSSI),
-            "hardware_connected": hardware_connected,
+            name: read_virtual_pin(pin, DATA_HTTP_TIMEOUT_S, False)
+            for name, pin in pin_map
         }
 
-        _result_queue.put(result)
+        failed = [name for name, value in result.items() if value is None]
+        if failed:
+            elapsed = time.monotonic() - cycle_started
+            log_txt(
+                f"Sensor acquisition incomplete after {elapsed:.2f}s; "
+                f"missing: {', '.join(failed)}"
+            )
+
+        _result_queue.put(("data", result))
 
     except Exception as e:
         log_txt(f"Fetch worker error: {e}")
-        _result_queue.put(None)
+        _result_queue.put(("data", None))
 
     finally:
         _fetch_running = False
-
 
 def _trigger_fetch():
     """
@@ -1781,6 +1783,82 @@ def _trigger_fetch():
     app.after(UPDATE_INTERVAL_MS, _trigger_fetch)
 
 
+def _health_worker():
+    """Require both a Blynk session and recently advancing V23 telemetry."""
+
+    global _last_heartbeat_value, _last_heartbeat_activity
+    global _last_live_wallclock, _health_failure_streak
+
+    while True:
+        cycle_started = time.monotonic()
+        # Keep the original server-friendly one-request-at-a-time pattern.
+        server_reachable, blynk_connected = check_connection_status()
+        heartbeat_server, heartbeat_value = _read_telemetry_heartbeat()
+        server_reachable = server_reachable or heartbeat_server
+        now = time.monotonic()
+
+        if server_reachable:
+            _health_failure_streak = 0
+        else:
+            _health_failure_streak += 1
+            if _health_failure_streak < 2:
+                # Keep the last UI state through one complete failed cycle.
+                elapsed = time.monotonic() - cycle_started
+                wait_s = max(0.0, HEALTH_POLL_MS / 1000.0 - elapsed)
+                threading.Event().wait(wait_s)
+                continue
+
+        if heartbeat_value is not None:
+            heartbeat_value = str(heartbeat_value).strip()
+            if _last_heartbeat_value is None:
+                # The first cached value is only a baseline, never proof of a
+                # live stream. A later different sequence number is proof.
+                _last_heartbeat_value = heartbeat_value
+            elif heartbeat_value != _last_heartbeat_value:
+                _last_heartbeat_value = heartbeat_value
+                _last_heartbeat_activity = now
+                _last_live_wallclock = datetime.now()
+
+        heartbeat_fresh = (
+            _last_heartbeat_activity is not None
+            and (now - _last_heartbeat_activity) <= HEARTBEAT_TIMEOUT_S
+        )
+        device_connected = (
+            server_reachable
+            and blynk_connected is True
+            and heartbeat_fresh
+        )
+
+        if not server_reachable:
+            source = "server unavailable"
+        elif blynk_connected is False:
+            source = "ESP8266 not connected to Blynk"
+        elif blynk_connected is None:
+            source = "Blynk device status unavailable"
+        elif heartbeat_value is None:
+            source = "V23 heartbeat unavailable"
+        elif not heartbeat_fresh:
+            source = "waiting for a new V23 heartbeat"
+        else:
+            source = "Blynk session + fresh V23 heartbeat"
+
+        _result_queue.put(("status", {
+            "server_connected": server_reachable,
+            "blynk_connected": blynk_connected,
+            "device_connected": device_connected,
+            "heartbeat_available": heartbeat_value is not None,
+            "heartbeat_fresh": heartbeat_fresh,
+            "heartbeat_value": heartbeat_value,
+            "last_live": _last_live_wallclock,
+            "source": source,
+            "checked_at": datetime.now(),
+        }))
+
+        elapsed = time.monotonic() - cycle_started
+        wait_s = max(0.0, HEALTH_POLL_MS / 1000.0 - elapsed)
+        threading.Event().wait(wait_s)
+
+
 def _poll_queue():
     """
     Called every 100 ms by app.after().
@@ -1790,12 +1868,14 @@ def _poll_queue():
 
     try:
         while True:
-            result = _result_queue.get_nowait()
-            if result is not None:
+            kind, result = _result_queue.get_nowait()
+            if kind == "data" and result is not None:
                 try:
                     _process_result(result)
                 except Exception as e:
                     log_txt(f"PROCESS RESULT ERROR: {e}")
+            elif kind == "status":
+                _apply_connection_status(result)
     except queue.Empty:
         pass
 
@@ -2047,12 +2127,24 @@ def rssi_icon(quality):
 
 frame_bottom = ctk.CTkFrame(app, fg_color="#0f1623", corner_radius=12,
                              border_width=1, border_color="#2a3a52",
-                             height=40)
+                             height=82)
 frame_bottom.pack(fill="x", padx=16, pady=(4, 10))
 frame_bottom.pack_propagate(False)
 
+# Keep controls and connection diagnostics on separate rows. This prevents the
+# action buttons from squeezing or clipping server/device status text.
+frame_controls = ctk.CTkFrame(frame_bottom, fg_color="transparent", height=40)
+frame_controls.pack(fill="x", padx=6, pady=(3, 0))
+frame_controls.pack_propagate(False)
+
+frame_connection = ctk.CTkFrame(
+    frame_bottom, fg_color="#0b111c", corner_radius=8, height=32
+)
+frame_connection.pack(fill="x", padx=8, pady=(1, 5))
+frame_connection.pack_propagate(False)
+
 label_hist = ctk.CTkLabel(
-    frame_bottom,
+    frame_controls,
     text="Graph History",
     font=("Segoe UI", 12),
     text_color="#64748b"
@@ -2060,8 +2152,10 @@ label_hist = ctk.CTkLabel(
 label_hist.pack(side="left", padx=10)
 
 option_history = ctk.CTkOptionMenu(
-    frame_bottom,
+    frame_controls,
     variable=history_var,
+    width=90,
+    height=30,
     values=["1", "3", "24", "48", "168"],
     fg_color="#1a2332",
     button_color="#1e3a5f",
@@ -2070,15 +2164,15 @@ option_history = ctk.CTkOptionMenu(
     text_color="#f1f5f9",
     font=("Segoe UI", 12)
 )
-option_history.pack(side="left", padx=8)
+option_history.pack(side="left", padx=5)
 
 label_hist_desc = ctk.CTkLabel(
-    frame_bottom,
+    frame_controls,
     text="Hours  (168h = 7 days)",
     font=("Segoe UI", 12),
     text_color="#475569"
 )
-label_hist_desc.pack(side="left", padx=8)
+label_hist_desc.pack(side="left", padx=5)
 
 
 # ============================================================
@@ -2097,8 +2191,10 @@ label_hist_desc.pack(side="left", padx=8)
 # ============================================================
 
 button_download_history = ctk.CTkButton(
-    frame_bottom,
+    frame_controls,
     text="Download Server History",
+    width=158,
+    height=30,
     command=download_blynk_history,
     fg_color="#1e3a5f",
     hover_color="#22d3ee",
@@ -2107,7 +2203,7 @@ button_download_history = ctk.CTkButton(
     corner_radius=8
 )
 
-button_download_history.pack(side="left", padx=16)
+button_download_history.pack(side="left", padx=8)
 
 # ============================================================
 # ZERO CALIBRATION BUTTON
@@ -2117,26 +2213,27 @@ button_download_history.pack(side="left", padx=16)
 # Shows a confirmation dialog before sending to prevent
 # accidental calibration while indoors.
 #
-# STARTS DISABLED (gray) until UART signal is confirmed on
-# V13 — meaning the two UART wires are physically connected
-# and the INO is running the UART code.
+# Always available. Delivery failures are reported after the command instead
+# of disabling the control because a missing V13 GET is inconclusive.
 #
 # Requires matching BLYNK_WRITE(V20) handler in the INO.
 #
 # ============================================================
 
 button_zero_cal = ctk.CTkButton(
-    frame_bottom,
+    frame_controls,
     text="Zero Calibration",
-    fg_color="gray40",
-    hover_color="gray50",
-    state="disabled",
+    width=122,
+    height=30,
+    fg_color="#555500",
+    hover_color="#888800",
+    state="normal",
     command=trigger_zero_calibration,
     font=("Segoe UI", 12),
     corner_radius=8
 )
 
-button_zero_cal.pack(side="left", padx=8)
+button_zero_cal.pack(side="left", padx=5)
 
 # ============================================================
 # ABC STATE BUTTON
@@ -2150,27 +2247,27 @@ button_zero_cal.pack(side="left", padx=8)
 #   green  "ABC: ON"   — ABC currently enabled
 #   red    "ABC: OFF"  — ABC currently disabled
 #
-# STARTS DISABLED (gray) until UART signal is confirmed on
-# V13. Once UART is detected, the actual ABC state is read
-# from V21 and the button colour updates accordingly.
-# Refreshed every ~60 seconds.
+# Always clickable. The actual ABC state is read from V21 when available and
+# its colour is refreshed every ~60 seconds.
 #
 # Requires matching BLYNK_WRITE(V21) handler in the INO.
 #
 # ============================================================
 
 button_abc = ctk.CTkButton(
-    frame_bottom,
+    frame_controls,
     text="ABC: ?",
+    width=105,
+    height=30,
     fg_color="gray40",
     hover_color="gray50",
-    state="disabled",
+    state="normal",
     command=toggle_abc,
     font=("Segoe UI", 12),
     corner_radius=8
 )
 
-button_abc.pack(side="left", padx=8)
+button_abc.pack(side="left", padx=5)
 
 # ============================================================
 # MANUAL SENSOR RESET BUTTON                      [NEW v6.14]
@@ -2179,26 +2276,27 @@ button_abc.pack(side="left", padx=8)
 # Sends a soft reset command to the MH-Z19 sensor via V22.
 # Shows a confirmation dialog before sending.
 #
-# STARTS DISABLED (gray) until UART signal is confirmed on
-# V13 — the soft reset is sent over UART by the INO so UART
-# must be physically connected for it to work.
+# Always available. UART wiring is still required for the physical reset; the
+# dashboard does not disable the control based on an inconclusive V13 read.
 #
 # Requires matching BLYNK_WRITE(V22) handler in the INO.
 #
 # ============================================================
 
 button_sensor_reset = ctk.CTkButton(
-    frame_bottom,
+    frame_controls,
     text="Reset Sensor",
-    fg_color="gray40",
-    hover_color="gray50",
-    state="disabled",
+    width=118,
+    height=30,
+    fg_color="#5f1e1e",
+    hover_color="#ff4444",
+    state="normal",
     command=trigger_sensor_reset,
     font=("Segoe UI", 12),
     corner_radius=8
 )
 
-button_sensor_reset.pack(side="left", padx=8)
+button_sensor_reset.pack(side="left", padx=5)
 
 
 # ============================================================
@@ -2226,20 +2324,28 @@ button_sensor_reset.pack(side="left", padx=8)
 # ============================================================
 
 label_wifi = ctk.CTkLabel(
-    frame_bottom,
+    frame_connection,
     text="📡  WiFi: —",
-    font=("Segoe UI", 12),
+    font=("Segoe UI", 11),
     text_color="#475569"
 )
-label_wifi.pack(side="right", padx=12)
+label_wifi.pack(side="right", padx=(8, 12))
 
 label_status = ctk.CTkLabel(
-    frame_bottom,
-    text="⬤  CONNECTING...",
-    font=("Segoe UI", 12, "bold"),
+    frame_connection,
+    text="ESP8266: CHECKING...",
+    font=("Segoe UI", 11, "bold"),
     text_color="#475569"
 )
-label_status.pack(side="right", padx=16)
+label_status.pack(side="right", padx=10)
+
+label_server_status = ctk.CTkLabel(
+    frame_connection,
+    text="SERVER: CHECKING...",
+    font=("Segoe UI", 11, "bold"),
+    text_color="#475569"
+)
+label_server_status.pack(side="right", padx=10)
 
 # ============================================================
 # LAST UPDATED TIMESTAMP
@@ -2251,13 +2357,72 @@ label_status.pack(side="right", padx=16)
 # ============================================================
 
 label_last_update = ctk.CTkLabel(
-    frame_bottom,
-    text="Last update: --:--:--",
-    font=("Segoe UI", 12),
+    frame_connection,
+    text="Last confirmed  |  Server --:--:--  |  Telemetry --:--:--",
+    font=("Segoe UI", 11),
     text_color="#475569"
 )
-label_last_update.pack(side="right", padx=16)
+label_last_update.pack(side="left", padx=12)
 
+
+def _apply_connection_status(status):
+    """Apply server, Blynk-session, and fresh-telemetry states."""
+
+    global _server_link_state, _blynk_device_state, _heartbeat_is_fresh
+    global _device_connected, _last_server_seen, _last_device_seen
+
+    checked_at = status.get("checked_at", datetime.now())
+    _server_link_state = bool(status.get("server_connected"))
+    _blynk_device_state = status.get("blynk_connected")
+    _heartbeat_is_fresh = bool(status.get("heartbeat_fresh"))
+    _device_connected = bool(status.get("device_connected"))
+    blynk_connected = _blynk_device_state
+    heartbeat_fresh = _heartbeat_is_fresh
+    last_live = status.get("last_live")
+
+    if _server_link_state:
+        _last_server_seen = checked_at
+        label_server_status.configure(
+            text="SERVER: ONLINE", text_color="#00cc44")
+    else:
+        label_server_status.configure(
+            text="SERVER: UNAVAILABLE", text_color="#ff2222")
+
+    if not _server_link_state:
+        label_status.configure(
+            text="ESP8266: UNKNOWN", text_color="#f59e0b")
+        label_wifi.configure(text="WiFi: UNKNOWN", text_color="#f59e0b")
+    elif blynk_connected is False:
+        label_status.configure(
+            text="ESP8266: OFFLINE", text_color="#ff2222")
+        label_wifi.configure(text="WiFi: OFFLINE", text_color="#ff2222")
+    elif blynk_connected is None:
+        label_status.configure(
+            text="ESP8266: STATUS UNKNOWN", text_color="#f59e0b")
+        label_wifi.configure(text="WiFi: UNKNOWN", text_color="#f59e0b")
+    elif not heartbeat_fresh:
+        # The server sees a hardware session, but no newly delivered sensor
+        # cycle has been proven. Cached values must remain visibly stale.
+        label_status.configure(
+            text="ESP8266: NO LIVE DATA", text_color="#f59e0b")
+        label_wifi.configure(text="WiFi: NO LIVE DATA", text_color="#f59e0b")
+    else:
+        _last_device_seen = last_live
+        label_status.configure(
+            text="ESP8266: CONNECTED", text_color="#00cc44")
+
+    server_seen = (
+        _last_server_seen.strftime("%H:%M:%S")
+        if _last_server_seen is not None else "--:--:--"
+    )
+    telemetry_seen = (
+        _last_device_seen.strftime("%H:%M:%S")
+        if _last_device_seen is not None else "--:--:--"
+    )
+    label_last_update.configure(
+        text=f"Last confirmed  |  Server {server_seen}  |  Telemetry {telemetry_seen}",
+        text_color="white" if _device_connected else "#f59e0b"
+    )
 # ============================================================
 # GRAPH CLICK HANDLER
 # ============================================================
@@ -2340,7 +2505,6 @@ def _process_result(result):
         msg      = result.get("msg")
         co2_uart = result.get("co2_uart")
         rssi     = result.get("rssi")   # [NEW v6.12] WiFi RSSI in dBm
-        hardware_connected = result.get("hardware_connected")
 
         if temp is not None:
             label_temp_value.configure(text=f"{float(temp):.1f} °C")
@@ -2362,11 +2526,18 @@ def _process_result(result):
         # If the ESP8266 is offline, V14 can still contain the last
         # stored RSSI (for example -53 dBm / 94%). Never display that
         # retained value as live WiFi strength.
-        if hardware_connected is False:
+        if not _device_connected:
+            if not _server_link_state or _blynk_device_state is None:
+                wifi_state = "UNKNOWN"
+                wifi_color = "#f59e0b"
+            elif _blynk_device_state is False:
+                wifi_state = "OFFLINE"
+                wifi_color = "#ef4444"
+            else:
+                wifi_state = "NO LIVE DATA"
+                wifi_color = "#f59e0b"
             label_wifi.configure(
-                text="📡  WiFi OFFLINE",
-                text_color="#ef4444"
-            )
+                text=f"WiFi: {wifi_state}", text_color=wifi_color)
 
         elif rssi is not None:
             try:
@@ -2396,34 +2567,6 @@ def _process_result(result):
             label_wifi.configure(
                 text="📡  WiFi: —",
                 text_color="#475569"
-            )
-
-        # ====================================================
-        # CONNECTION STATUS UPDATE
-        # ====================================================
-        #
-        # Consider connected if at least CO2 was received,
-        # as it is the primary sensor value.
-        #
-        # ====================================================
-
-        # Prefer the real Blynk hardware state. If the endpoint is not
-        # available on an older server, fall back to the old CO2 test.
-        if hardware_connected is True or (
-            hardware_connected is None and co2 is not None
-        ):
-            label_status.configure(
-                text="⬤  CONNECTED",
-                text_color="#00cc44"
-            )
-            label_last_update.configure(
-                text=f"Last update: {datetime.now().strftime('%H:%M:%S')}",
-                text_color="white"
-            )
-        else:
-            label_status.configure(
-                text="⬤  OFFLINE",
-                text_color="#ff2222"
             )
 
         # ====================================================
@@ -2503,25 +2646,19 @@ def _process_result(result):
 # PERIODIC UART AVAILABILITY + ABC STATE REFRESH
 # ====================================================
 #
-# Every ABC_REFRESH_EVERY cycles (~60 seconds):
-#   1. Re-check if UART signal is present on V13
-#   2. If available: refresh ABC button state from V21
-#   3. If unavailable: keep / set buttons disabled
-#
-# This means buttons automatically light up the first
-# time UART wires are connected, without restarting.
-#
-# abc_refresh_counter is initialised to ABC_REFRESH_EVERY
-# so the check runs immediately on the very first cycle,
-# enabling buttons at startup if UART is already wired.
-#
+# V13 availability is checked every data cycle. ABC state itself is refreshed
+# every ABC_REFRESH_EVERY cycles (~60 seconds) to avoid needless HTTP traffic.
+# A missing V13 response never disables controls because it is an inconclusive
+# transport failure, not evidence that the UART wires disappeared.
 # ====================================================
 
+        uart_just_enabled = check_uart_availability(co2_uart)
         abc_refresh_counter += 1
 
         if abc_refresh_counter >= ABC_REFRESH_EVERY:
             abc_refresh_counter = 0
-            check_uart_availability(co2_uart)
+            if uart_available and not uart_just_enabled:
+                refresh_abc_state()
 
         if msg is not None:
             label_msg.configure(text=msg)
@@ -2808,6 +2945,7 @@ abc_refresh_counter = ABC_REFRESH_EVERY
 
 app.after(100, _poll_queue)
 app.after(0,   _trigger_fetch)
+threading.Thread(target=_health_worker, daemon=True).start()
 
 # ============================================================
 # SCHEDULE HOURLY LOG TRIM
